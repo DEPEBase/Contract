@@ -30,7 +30,6 @@ contract ContestInstance is Ownable, ReentrancyGuard, Pausable {
     //                           CONSTANTS
     // =============================================================
     
-    uint256 private constant MAX_SUBMISSIONS = 1000;
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MIN_VOTE_USD = 1e18; // $1 USD
     uint256 private constant MAX_VOTE_USD = 10e18; // $10 USD
@@ -218,7 +217,6 @@ contract ContestInstance is Ownable, ReentrancyGuard, Pausable {
     error SubmissionNotExists();
     error AlreadyVoted();
     error VoteAmountInvalid();
-    error MaxSubmissionsReached();
     error RewardsAlreadyDistributed();
     error NoSubmissions();
     error TransferFailed();
@@ -243,7 +241,6 @@ contract ContestInstance is Ownable, ReentrancyGuard, Pausable {
             revert InvalidAddress();
         }
         if (_memePoolAmount == 0) revert InvalidAmount();
-        if (_minEntriesRequired == 0 || _minEntriesRequired > MAX_SUBMISSIONS) revert InvalidAmount();
         if (_duration < 1 hours || _duration > 7 days) revert InvalidDuration();
         if (bytes(_title).length == 0 || bytes(_title).length > MAX_STRING_LENGTH) revert InvalidString();
         if (_depePriceUSD == 0) revert InvalidAmount();
@@ -295,9 +292,6 @@ contract ContestInstance is Ownable, ReentrancyGuard, Pausable {
         if (bytes(submissionTitle).length > MAX_STRING_LENGTH) {
             revert InvalidString();
         }
-        
-        // Check submission limit
-        if (state.submissionCount >= MAX_SUBMISSIONS) revert MaxSubmissionsReached();
 
         uint256 submissionId = state.submissionCount;
         
@@ -538,6 +532,13 @@ contract ContestInstance is Ownable, ReentrancyGuard, Pausable {
     // =============================================================
     //                      ADMIN FUNCTIONS
     // =============================================================
+    
+    function updateDEPEPrice(uint256 newPrice) external onlyOwner {
+        if (newPrice == 0) revert InvalidAmount();
+        uint256 oldPrice = config.depePriceUSD;
+        config.depePriceUSD = newPrice;
+        emit DEPEPriceUpdated(oldPrice, newPrice);
+    }
 
     function pause() external onlyOwner {
         _pause();

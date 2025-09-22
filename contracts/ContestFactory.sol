@@ -34,11 +34,9 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
     
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
     uint256 private constant MIN_CONTEST_DURATION = 1 hours;
-    uint256 private constant MAX_CONTESTS_PER_DAY = 5; // Per user
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
-    uint256 private constant MIN_ENTRIES_LIMIT = 1000;
-    uint256 private constant COOLDOWN_PERIOD = 1 hours;
+    // uint256 private constant COOLDOWN_PERIOD = 1 hours;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
     uint256 private constant BASIS_POINTS = 10000;
 
@@ -178,7 +176,7 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
         returns (address contestAddress) 
     {
         // Comprehensive parameter validation
-        _validateContestParameters(totalPoolAmount, minEntriesRequired, duration, title, description);
+        _validateContestParameters(totalPoolAmount, duration, title, description);
         
         // Process fees and transfers
         uint256 netPoolAmount = _processFees(totalPoolAmount);
@@ -406,7 +404,6 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
     
     function _validateContestParameters(
         uint256 totalPoolAmount,
-        uint256 minEntriesRequired,
         uint256 duration,
         string calldata title,
         string calldata description
@@ -424,10 +421,6 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
             revert InvalidDuration();
         }
         
-        // Entries validation
-        if (minEntriesRequired == 0 || minEntriesRequired > MIN_ENTRIES_LIMIT) {
-            revert InvalidMinEntries();
-        }
         
         // String validation
         if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {

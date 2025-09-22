@@ -421,6 +421,13 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
             revert InvalidDuration();
         }
         
+<<<<<<< HEAD
+=======
+        // Entries validation
+        if (minEntriesRequired == 0) {
+            revert InvalidMinEntries();
+        }
+>>>>>>> 233bf6c028883a172ec8db95c27924410aafd54b
         
         // String validation
         if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {

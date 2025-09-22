@@ -34,10 +34,8 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
     
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
     uint256 private constant MIN_CONTEST_DURATION = 1 hours;
-    uint256 private constant MAX_CONTESTS_PER_DAY = 5; // Per user
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
-    uint256 private constant MIN_ENTRIES_LIMIT = 1000;
     uint256 private constant COOLDOWN_PERIOD = 1 hours;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
     uint256 private constant BASIS_POINTS = 10000;
@@ -425,7 +423,7 @@ contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
         }
         
         // Entries validation
-        if (minEntriesRequired == 0 || minEntriesRequired > MIN_ENTRIES_LIMIT) {
+        if (minEntriesRequired == 0) {
             revert InvalidMinEntries();
         }
         

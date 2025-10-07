@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.26;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/Create2.sol";
-import "./ContestInstance.sol";
+import "./Instance.sol";
 
 /**
  * @title ContestFactory
@@ -414,13 +412,13 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         ContestInstance contestInstance = new ContestInstance(
             config.depeToken,
             msg.sender,
+            config.platformWallet,
             netPoolAmount,
             minEntriesRequired,
             duration,
             title,
             description,
-            config.depePriceUSD,
-            config.platformWallet // NEW: Platform wallet for signature verification
+            config.depePriceUSD
         );
         address contestAddress = address(contestInstance);
         

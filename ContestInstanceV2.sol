@@ -31,8 +31,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     uint256 private constant BASIS_POINTS = 10000;
     
     uint256 private constant MEME_WINNER_PERCENT = 10000; // 100%
-    uint256 private constant CONTEST_CREATOR_PERCENT = 2500; // 25%
-    uint256 private constant STAKERS_PERCENT = 7500; // 75%
+    uint256 private constant CONTEST_CREATOR_PERCENT = 2000; // 20%
+    uint256 private constant STAKERS_PERCENT = 7000; // 70%
 
     // =============================================================
     //                            ENUMS

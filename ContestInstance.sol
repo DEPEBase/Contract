@@ -226,8 +226,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         string calldata memeType,
         string calldata submissionTitle,
         string calldata submissionDescription,
-        uint256 fid
-        // bytes calldata platformSignature
+        uint256 fid,
+        bytes calldata platformSignature
     ) external onlyDuringSubmission nonReentrant whenNotPaused {
         if (bytes(memeUrl).length == 0) revert InvalidString();
         if (bytes(memeType).length == 0 || bytes(memeType).length > 50) revert InvalidString();
@@ -237,7 +237,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         bytes32 messageHash = keccak256(abi.encodePacked(
             address(this), memeUrl, memeType, submissionTitle, msg.sender, fid, block.timestamp
         ));
-        // _validateSignature(messageHash, platformSignature);
+        _validateSignature(messageHash, platformSignature);
 
         uint256 submissionId = state.submissionCount;
         _submissions[submissionId] = Submission({
@@ -274,8 +274,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     function vote(
         uint256 submissionId,
         uint256 voteAmount,
-        uint256 fid
-        // bytes calldata platformSignature
+        uint256 fid,
+        bytes calldata platformSignature
     ) external onlyDuringVoting validSubmission(submissionId) nonReentrant whenNotPaused {
         if (_submissionVotes[submissionId][msg.sender] > 0) revert AlreadyVoted();
         if (fid == 0) revert InvalidFID();
@@ -287,7 +287,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         bytes32 messageHash = keccak256(abi.encodePacked(
             address(this), submissionId, voteAmount, msg.sender, fid, block.timestamp
         ));
-        // _validateSignature(messageHash, platformSignature);
+        _validateSignature(messageHash, platformSignature);
 
         IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), voteAmount);
 
@@ -308,8 +308,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     function stake(
         uint256 submissionId,
         uint256 stakeAmount,
-        uint256 fid
-        // bytes calldata platformSignature
+        uint256 fid,
+        bytes calldata platformSignature
     ) external onlyDuringVoting validSubmission(submissionId) nonReentrant whenNotPaused {
         if (stakeAmount == 0) revert InvalidAmount();
         
@@ -320,7 +320,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         bytes32 messageHash = keccak256(abi.encodePacked(
             address(this), submissionId, stakeAmount, msg.sender, fid, block.timestamp
         ));
-        // _validateSignature(messageHash, platformSignature);
+        _validateSignature(messageHash, platformSignature);
 
         
         uint256 currentAmount = _submissionStakes[submissionId][msg.sender];

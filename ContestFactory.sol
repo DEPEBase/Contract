@@ -17,7 +17,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
 
     // ===== CONSTANTS =====
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
-    uint256 private constant MIN_CONTEST_DURATION = 1 minutes;
+    uint256 private constant MIN_CONTEST_DURATION = 1 hours;
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee

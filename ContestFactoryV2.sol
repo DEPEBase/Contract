@@ -4,8 +4,7 @@ pragma solidity ^0.8.26;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/Create2.sol";
-import "./ContestInstanceV2.sol";
+import "./Instance.sol";
 
 /**
  * @title ContestFactory
@@ -18,7 +17,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
 
     // ===== CONSTANTS =====
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
-    uint256 private constant MIN_CONTEST_DURATION = 1 hours;
+    uint256 private constant MIN_CONTEST_DURATION = 1 minutes;
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
@@ -38,7 +37,8 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         address depeToken;
         address platformWallet;
         uint256 minPoolDEPE;
-        uint256 depePriceUSD;
+        uint256 maxVoteAmount;
+        uint256 minVoteAmount;
         uint256 totalContests;
         uint256 totalFeesCollected;
     }
@@ -57,7 +57,6 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     mapping(address => uint256) private _dailyResetTime;
     
     // Contest validation
-    uint256 public depePriceUSD = 0.0014 * 10**18;
     uint256 public minPoolDEPE = 1_000_000 * 1e18; // 1M DEPE minimum
 
     // ===== EVENTS =====
@@ -73,11 +72,12 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         string title
     );
     
-    event DEPEPriceUpdated(uint256 oldPrice, uint256 newPrice);
+    event DEPEVoteAmoutUpdated(uint256 min, uint256 newPrice);
     event MinPoolUpdated(uint256 oldMin, uint256 newMin);
     event ContestDeactivated(uint256 indexed contestId, address indexed creator);
     event PlatformWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event PlatformFeeCollected(uint256 indexed contestId, uint256 amount, address indexed creator);
+    event durationLog(uint256 duration, uint256 minDuration,  uint256 maxDuration);
 
     // ===== ERRORS =====
     error InvalidAddress();
@@ -102,7 +102,9 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== CONSTRUCTOR =====
     constructor(
         address _depeToken,
-        address _platformWallet
+        address _platformWallet,
+        uint256 maxVoteAmount,
+        uint256 minVoteAmount
     ) Ownable(msg.sender) {
         if (_depeToken == address(0) || _platformWallet == address(0)) revert InvalidAddress();
         
@@ -110,7 +112,8 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             depeToken: _depeToken,
             platformWallet: _platformWallet,
             minPoolDEPE: minPoolDEPE,
-            depePriceUSD: depePriceUSD,
+            maxVoteAmount: maxVoteAmount,
+            minVoteAmount: minVoteAmount,
             totalContests: 0,
             totalFeesCollected: 0
         });
@@ -296,14 +299,17 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     }
 
     /**
-     * @dev Update DEPE price for USD conversion (only owner)
-     * @param newPrice New DEPE price in USD (18 decimals)
+     * @dev Update DEPE vote amount (only owner)
+     * @param _maxVote & _minVote DEPE amount in (18 decimals)
      */
-    function updateDEPEPrice(uint256 newPrice) external onlyOwner {
-        if (newPrice == 0) revert InvalidAmount();
-        uint256 oldPrice = config.depePriceUSD;
-        config.depePriceUSD = newPrice;
-        emit DEPEPriceUpdated(oldPrice, newPrice);
+    function updateDEPEPrice(uint256 _maxVote, uint256 _minVote) external onlyOwner {
+        if (_maxVote == 0) revert InvalidAmount();
+        if (_minVote == 0) revert InvalidAmount();
+        if (_maxVote < _minVote) revert InvalidAmount();
+        
+        config.maxVoteAmount = _maxVote;
+        config.minVoteAmount = _minVote;
+        emit DEPEVoteAmoutUpdated(_minVote, _maxVote);
     }
 
     /**
@@ -362,7 +368,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 duration,
         string calldata title,
         string calldata description
-    ) private view {
+    ) private  {
         // Amount validation (validate total amount, not net amount)
         if (totalPoolAmount < config.minPoolDEPE) revert PoolBelowMinimum();
         
@@ -370,7 +376,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
         uint256 netAmount = totalPoolAmount - platformFee;
         if (netAmount < (config.minPoolDEPE * 90) / 100) revert PoolBelowMinimum(); // Net should be at least 90% of minimum
-        
+        emit durationLog(duration, MIN_CONTEST_DURATION, MAX_CONTEST_DURATION);
         // Duration validation
         if (duration < MIN_CONTEST_DURATION || duration > MAX_CONTEST_DURATION) {
             revert InvalidDuration();
@@ -418,7 +424,8 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             duration,
             title,
             description,
-            config.depePriceUSD
+            config.maxVoteAmount,
+            config.minVoteAmount
         );
         address contestAddress = address(contestInstance);
         

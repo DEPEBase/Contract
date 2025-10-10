@@ -4,7 +4,12 @@ pragma solidity ^0.8.26;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+<<<<<<< HEAD:ContestFactoryV2.sol
 import "./Instance.sol";
+=======
+import "@openzeppelin/contracts/utils/Create2.sol";
+import "./ContestInstance.sol";
+>>>>>>> 72a1a61c5b19e2aed16e38023d8eb5ce0b73dc4f:ContestFactory.sol
 
 /**
  * @title ContestFactory

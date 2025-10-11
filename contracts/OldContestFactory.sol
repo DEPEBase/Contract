@@ -1,29 +1,49 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity 0.8.26;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/Create2.sol";
 import "./ContestInstance.sol";
 
 /**
- * @title ContestFactory
- * @dev Factory contract with platform validation and DEPE token integration
- * @notice Updated factory with platform wallet parameter while preserving all existing functionality
+ * @title Contest Factory Contract
+ * @dev Factory contract for creating DEPE meme contests
  * @author DEPE Team
+ * 
+ * Features:
+ * - Creates new contest instances with deterministic addresses
+ * - Collects platform fees before funding contests
+ * - Validates contest parameters comprehensively
+ * - Tracks all contests with efficient storage
+ * - Rate limiting and anti-spam protection
+ * - Gas-optimized operations
+ * - Security-hardened for production use
+ * 
+ * @notice Platform fee is collected by factory, remainder funds the contest
  */
-contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
+contract ContestFactory is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
-    // ===== CONSTANTS =====
+    // =============================================================
+    //                           CONSTANTS
+    // =============================================================
+    
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
     uint256 private constant MIN_CONTEST_DURATION = 1 hours;
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
+    // uint256 private constant COOLDOWN_PERIOD = 1 hours;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
     uint256 private constant BASIS_POINTS = 10000;
 
-    // ===== STRUCTS =====
+    // =============================================================
+    //                            STRUCTS
+    // =============================================================
+    
     struct ContestInfo {
         address contestAddress;
         address creator;
@@ -37,13 +57,15 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         address depeToken;
         address platformWallet;
         uint256 minPoolDEPE;
-        uint256 maxVoteAmount;
-        uint256 minVoteAmount;
+        uint256 depePriceUSD;
         uint256 totalContests;
         uint256 totalFeesCollected;
     }
 
-    // ===== STATE VARIABLES =====
+    // =============================================================
+    //                       STATE VARIABLES
+    // =============================================================
+    
     FactoryConfig public config;
     
     // Contest tracking - optimized storage
@@ -57,9 +79,13 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     mapping(address => uint256) private _dailyResetTime;
     
     // Contest validation
+    uint256 public depePriceUSD = 0.0014 * 10**18;
     uint256 public minPoolDEPE = 1_000_000 * 1e18; // 1M DEPE minimum
 
-    // ===== EVENTS =====
+    // =============================================================
+    //                           EVENTS
+    // =============================================================
+    
     event ContestCreated(
         uint256 indexed contestId,
         address indexed contestAddress,
@@ -72,14 +98,16 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         string title
     );
     
-    event DEPEVoteAmoutUpdated(uint256 min, uint256 newPrice);
+    event DEPEPriceUpdated(uint256 oldPrice, uint256 newPrice);
     event MinPoolUpdated(uint256 oldMin, uint256 newMin);
     event ContestDeactivated(uint256 indexed contestId, address indexed creator);
     event PlatformWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event PlatformFeeCollected(uint256 indexed contestId, uint256 amount, address indexed creator);
-    event durationLog(uint256 duration, uint256 minDuration,  uint256 maxDuration);
 
-    // ===== ERRORS =====
+    // =============================================================
+    //                           ERRORS
+    // =============================================================
+    
     error InvalidAddress();
     error InvalidAmount();
     error InvalidDuration();
@@ -93,18 +121,22 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     error TransferFailed();
     error UnauthorizedDeactivation();
 
-    // ===== MODIFIERS =====
+    // =============================================================
+    //                          MODIFIERS
+    // =============================================================
+
     modifier validContestId(uint256 contestId) {
         if (contestId >= config.totalContests) revert ContestNotExists();
         _;
     }
 
-    // ===== CONSTRUCTOR =====
+    // =============================================================
+    //                        CONSTRUCTOR
+    // =============================================================
+    
     constructor(
         address _depeToken,
-        address _platformWallet,
-        uint256 maxVoteAmount,
-        uint256 minVoteAmount
+        address _platformWallet
     ) Ownable(msg.sender) {
         if (_depeToken == address(0) || _platformWallet == address(0)) revert InvalidAddress();
         
@@ -112,14 +144,15 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             depeToken: _depeToken,
             platformWallet: _platformWallet,
             minPoolDEPE: minPoolDEPE,
-            maxVoteAmount: maxVoteAmount,
-            minVoteAmount: minVoteAmount,
+            depePriceUSD: depePriceUSD,
             totalContests: 0,
             totalFeesCollected: 0
         });
     }
 
-    // ===== CONTEST CREATION =====
+    // =============================================================
+    //                     CONTEST CREATION
+    // =============================================================
     
     /**
      * @dev Create a new contest with deterministic address
@@ -170,7 +203,9 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         return contestAddress;
     }
 
-    // ===== CONTEST MANAGEMENT =====
+    // =============================================================
+    //                   CONTEST MANAGEMENT
+    // =============================================================
     
     /**
      * @dev Deactivate a contest (creator only)
@@ -190,7 +225,9 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         emit ContestDeactivated(contestId, msg.sender);
     }
 
-    // ===== VIEW FUNCTIONS =====
+    // =============================================================
+    //                       VIEW FUNCTIONS
+    // =============================================================
     
     /**
      * @dev Get contest information by ID
@@ -285,7 +322,10 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         return config;
     }
 
-    // ===== ADMIN FUNCTIONS =====
+
+    // =============================================================
+    //                      ADMIN FUNCTIONS
+    // =============================================================
     
     /**
      * @dev Update platform wallet (only owner)
@@ -299,17 +339,14 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     }
 
     /**
-     * @dev Update DEPE vote amount (only owner)
-     * @param _maxVote & _minVote DEPE amount in (18 decimals)
+     * @dev Update DEPE price for USD conversion (only owner)
+     * @param newPrice New DEPE price in USD (18 decimals)
      */
-    function updateDEPEPrice(uint256 _maxVote, uint256 _minVote) external onlyOwner {
-        if (_maxVote == 0) revert InvalidAmount();
-        if (_minVote == 0) revert InvalidAmount();
-        if (_maxVote < _minVote) revert InvalidAmount();
-        
-        config.maxVoteAmount = _maxVote;
-        config.minVoteAmount = _minVote;
-        emit DEPEVoteAmoutUpdated(_minVote, _maxVote);
+    function updateDEPEPrice(uint256 newPrice) external onlyOwner {
+        if (newPrice == 0) revert InvalidAmount();
+        uint256 oldPrice = config.depePriceUSD;
+        config.depePriceUSD = newPrice;
+        emit DEPEPriceUpdated(oldPrice, newPrice);
     }
 
     /**
@@ -361,14 +398,16 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         return config.totalFeesCollected;
     }
 
-    // ===== INTERNAL FUNCTIONS =====
+    // =============================================================
+    //                    INTERNAL FUNCTIONS
+    // =============================================================
     
     function _validateContestParameters(
         uint256 totalPoolAmount,
         uint256 duration,
         string calldata title,
         string calldata description
-    ) private  {
+    ) private view {
         // Amount validation (validate total amount, not net amount)
         if (totalPoolAmount < config.minPoolDEPE) revert PoolBelowMinimum();
         
@@ -376,11 +415,12 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
         uint256 netAmount = totalPoolAmount - platformFee;
         if (netAmount < (config.minPoolDEPE * 90) / 100) revert PoolBelowMinimum(); // Net should be at least 90% of minimum
-        emit durationLog(duration, MIN_CONTEST_DURATION, MAX_CONTEST_DURATION);
+        
         // Duration validation
         if (duration < MIN_CONTEST_DURATION || duration > MAX_CONTEST_DURATION) {
             revert InvalidDuration();
         }
+        
         
         // String validation
         if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {
@@ -415,20 +455,19 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         string calldata title,
         string calldata description
     ) private returns (address) {
+
+        
         ContestInstance contestInstance = new ContestInstance(
             config.depeToken,
             msg.sender,
-            config.platformWallet,
             netPoolAmount,
             minEntriesRequired,
             duration,
             title,
             description,
-            config.maxVoteAmount,
-            config.minVoteAmount
+            config.depePriceUSD
         );
         address contestAddress = address(contestInstance);
-        
         // Transfer net pool amount to the contest contract
         IERC20(config.depeToken).safeTransfer(contestAddress, netPoolAmount);
         
@@ -463,6 +502,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             ++config.totalContests;
         }
 
+        
         emit ContestCreated(
             contestId,
             contestAddress,

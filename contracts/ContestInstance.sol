@@ -235,7 +235,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         if (fid == 0) revert InvalidFID();
 
         bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), memeUrl, memeType, submissionTitle, msg.sender, fid, block.timestamp
+            address(this), memeUrl, memeType, submissionTitle, msg.sender, fid
         ));
         _validateSignature(messageHash, platformSignature);
 

@@ -285,7 +285,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         }
 
         bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), submissionId, voteAmount, msg.sender, fid, block.timestamp
+            address(this), submissionId, voteAmount, msg.sender, fid
         ));
         _validateSignature(messageHash, platformSignature);
 
@@ -318,7 +318,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         
 
         bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), submissionId, stakeAmount, msg.sender, fid, block.timestamp
+            address(this), submissionId, stakeAmount, msg.sender, fid
         ));
         _validateSignature(messageHash, platformSignature);
 

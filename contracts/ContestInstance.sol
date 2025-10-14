@@ -34,7 +34,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // Constants for scoring weights (scaled by 1e18)
     uint256 constant ALPHA = 1e18;      // each vote = 1 point
     uint256 constant BETA = 5e14;       // 0.0005 in 18-decimal precision
-    uint256 constant GAMMA = 5e14; // example: 0.0005 scaled like BETA — tune as needed
 
     // =============================================================
     //                            ENUMS
@@ -377,82 +376,82 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // =============================================================
     
     function claimMemeWinnerReward(uint256 _fid) external onlyAfterVoting nonReentrant {
-    if (state.memeRewardClaimed) revert AlreadyClaimed();
-    if (_totalStakesByFid[_fid] < 0) revert NotAuthorized();
+        if (state.memeRewardClaimed) revert AlreadyClaimed();
+        if (_totalStakesByFid[_fid] < 0) revert NotAuthorized();
 
-    ContestPhase oldPhase = state.phase;
-    state.memeRewardClaimed = true;
+        ContestPhase oldPhase = state.phase;
+        state.memeRewardClaimed = true;
 
-    uint256 winnerIndex = type(uint256).max; // index in _allSubmissionFids
-    uint256 winnerFid = 0;                   // actual FID of winning submission
-    uint256 highestScore = 0;
-    uint256 highestVotes = 0;
-    bool found = false;
+        uint256 winnerIndex = type(uint256).max; // index in _allSubmissionFids
+        uint256 winnerFid = 0;                   // actual FID of winning submission
+        uint256 highestScore = 0;
+        uint256 highestVotes = 0;
+        bool found = false;
 
-    uint256 len = _allSubmissionFids.length;
-    for (uint256 i = 0; i < len; ) {
-        uint256 fid = _allSubmissionFids[i];
-        Submission storage s = _submissions[fid];
+        uint256 len = _allSubmissionFids.length;
+        for (uint256 i = 0; i < len; ) {
+            uint256 fid = _allSubmissionFids[i];
+            Submission storage s = _submissions[fid];
 
-        // finalScore = votes*ALPHA + voteAmount*BETA + stakeAmount*GAMMA
-        // all terms use 18-decimal scaling where needed.
-        uint256 scoreVotes = s.voteCount * ALPHA; // voteCount is integer, ALPHA scaled
-        uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18; // scale back
-        uint256 scoreStakeAmount = (s.totalStakeAmount * GAMMA) / 1e18;
+            // finalScore = votes * ALPHA + voteAmount * BETA
+            uint256 scoreVotes = s.voteCount * ALPHA; // scaled
+            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18; // scaled
 
-        uint256 finalScore = scoreVotes + scoreVoteAmount + scoreStakeAmount;
+            uint256 finalScore = scoreVotes + scoreVoteAmount;
 
-        // tie-break:
-        // 1) higher finalScore
-        // 2) if equal, higher voteCount
-        // 3) if equal, earlier submission (lower i)
-        bool takeWinner = false;
-        if (finalScore > highestScore) {
-            takeWinner = true;
-        } else if (finalScore == highestScore) {
-            if (s.voteCount > highestVotes) {
+            // tie-break rules:
+            // 1) higher finalScore
+            // 2) if equal, higher voteCount
+            // 3) if equal, earlier submission (lower i)
+            bool takeWinner = false;
+            if (finalScore > highestScore) {
                 takeWinner = true;
-            } else if (s.voteCount == highestVotes) {
-                // earlier submission wins: smaller index i
-                if (!found || i < winnerIndex) {
+            } else if (finalScore == highestScore) {
+                if (s.voteCount > highestVotes) {
                     takeWinner = true;
+                } else if (s.voteCount == highestVotes) {
+                    // earlier submission wins
+                    if (!found || i < winnerIndex) {
+                        takeWinner = true;
+                    }
                 }
             }
+
+            if (takeWinner) {
+                highestScore = finalScore;
+                highestVotes = s.voteCount;
+                winnerIndex = i;
+                winnerFid = fid;
+                found = true;
+            }
+
+            unchecked { ++i; }
         }
 
-        if (takeWinner) {
-            highestScore = finalScore;
-            highestVotes = s.voteCount;
-            winnerIndex = i;
-            winnerFid = fid;
-            found = true;
+        // if no valid votes or no submission found
+        if (!found || highestScore == 0) {
+            state.memeRewardClaimed = false;
+            state.phase = ContestPhase.FAILED;
+            emit PhaseChanged(oldPhase, ContestPhase.FAILED);
+            emit ContestFailed("No valid votes or stakes received");
+            _refundAll();
+            return;
         }
 
-        unchecked { ++i; }
+        // Save winner as FID (not index)
+        state.winningSubmissionFid = winnerFid;
+        state.phase = ContestPhase.ENDED;
+
+        emit WinnerDetermined(winnerFid, highestScore);
+        emit PhaseChanged(oldPhase, ContestPhase.ENDED);
+
+        // Transfer the meme pool to the winning submitter
+        address winnerAddr = _submissions[winnerFid].submitter;
+        IERC20(config.depeToken).safeTransfer(winnerAddr, config.memePoolAmount);
+
+        emit MemeRewardClaimed(winnerFid, config.memePoolAmount);
     }
 
-    if (!found || highestScore == 0) {
-        state.memeRewardClaimed = false;
-        state.phase = ContestPhase.FAILED;
-        emit PhaseChanged(oldPhase, ContestPhase.FAILED);
-        emit ContestFailed("No valid votes or stakes received");
-        _refundAll();
-        return;
-    }
-
-    // Save winner as FID (not index)
-    state.winningSubmissionFid = winnerFid;
-    state.phase = ContestPhase.ENDED;
-
-    emit WinnerDetermined(winnerFid, highestScore);
-    emit PhaseChanged(oldPhase, ContestPhase.ENDED);
-
-    // Transfer the meme pool to the winning submitter
-    address winnerAddr = _submissions[winnerFid].submitter;
-    IERC20(config.depeToken).safeTransfer(winnerAddr, config.memePoolAmount);
-
-    emit MemeRewardClaimed(winnerFid, config.memePoolAmount);
-}
 
     function claimCreatorReward() external onlyOwner onlyAfterVoting nonReentrant {
         if (state.creatorRewardClaimed) revert AlreadyClaimed();

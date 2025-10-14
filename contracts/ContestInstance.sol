@@ -375,9 +375,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                    REWARD DISTRIBUTION
     // =============================================================
     
-    function claimMemeWinnerReward(uint256 _fid) external onlyAfterVoting nonReentrant {
+    function claimMemeWinnerReward() external onlyAfterVoting nonReentrant {
         if (state.memeRewardClaimed) revert AlreadyClaimed();
-        if (_totalStakesByFid[_fid] < 0) revert NotAuthorized();
 
         ContestPhase oldPhase = state.phase;
         state.memeRewardClaimed = true;
@@ -447,6 +446,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
         // Transfer the meme pool to the winning submitter
         address winnerAddr = _submissions[winnerFid].submitter;
+        if (msg.sender != winnerAddr) revert NotAuthorized();
+
         IERC20(config.depeToken).safeTransfer(winnerAddr, config.memePoolAmount);
 
         emit MemeRewardClaimed(winnerFid, config.memePoolAmount);

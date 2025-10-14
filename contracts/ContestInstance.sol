@@ -130,6 +130,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     
     error InvalidAddress();
     error InvalidAmount();
+    error NoWinnerYet();
     error InvalidDuration();
     error InvalidString();
     error NotAuthorized();
@@ -533,6 +534,58 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         
         return submissions;
     }
+
+
+    function getWinner() external view onlyAfterVoting returns (
+        uint256 winnerFid,
+        uint256 highestScore,
+        uint256 highestVotes
+    ) {
+
+        uint256 len = _allSubmissionFids.length;
+        if (len == 0) revert NoWinnerYet();
+
+        uint256 bestScore = 0;
+        uint256 bestVotes = 0;
+        uint256 bestFid = 0;
+        bool found = false;
+
+        for (uint256 i = 0; i < len; ) {
+            uint256 fid = _allSubmissionFids[i];
+            Submission storage s = _submissions[fid];
+
+            // Use same scoring formula as in claimMemeWinnerReward
+            // (without stake amount)
+            uint256 scoreVotes = s.voteCount * ALPHA;
+            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18;
+            uint256 finalScore = scoreVotes + scoreVoteAmount;
+
+            bool takeWinner = false;
+            if (finalScore > bestScore) {
+                takeWinner = true;
+            } else if (finalScore == bestScore) {
+                if (s.voteCount > bestVotes) {
+                    takeWinner = true;
+                } else if (s.voteCount == bestVotes && (!found || i < bestFid)) {
+                    takeWinner = true;
+                }
+            }
+
+            if (takeWinner) {
+                bestScore = finalScore;
+                bestVotes = s.voteCount;
+                bestFid = fid;
+                found = true;
+            }
+
+            unchecked { ++i; }
+        }
+
+        if (!found || bestScore == 0) revert NoWinnerYet();
+
+        return (bestFid, bestScore, bestVotes);
+    }
+
 
     function getUserVoteAmount(address user, uint256 submissionFid) external view returns (uint256) {
         return _submissionVotes[submissionFid][user];

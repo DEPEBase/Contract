@@ -34,6 +34,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // Constants for scoring weights (scaled by 1e18)
     uint256 constant ALPHA = 1e18;      // each vote = 1 point
     uint256 constant BETA = 5e14;       // 0.0005 in 18-decimal precision
+    uint256 constant GAMMA = 5e14; // example: 0.0005 scaled like BETA — tune as needed
 
     // =============================================================
     //                            ENUMS
@@ -67,7 +68,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         ContestPhase phase;
         uint256 submissionCount;
         uint256 totalStakingPool;
-        uint256 winningSubmissionId;
+        uint256 winningSubmissionFid;
         bool memeRewardClaimed;
         bool creatorRewardClaimed;
     }
@@ -77,8 +78,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         uint256 fid;
         string memeUrl;
         string memeType;
-        string title;
-        string description;
         uint256 voteCount;
         uint256 totalVoteAmount;
         uint256 totalStakeAmount;
@@ -93,16 +92,21 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     ContestConfig public config;
     ContestState public state;
     
-    mapping(uint256 => Submission) private _submissions;
-    mapping(address => uint256[]) private _userSubmissions;
+    mapping(uint256 => Submission) private _submissions; // fid => Submission
+    mapping(address => bool) private _hasSubmitted; // Track if address has submitted
+    mapping(address => uint256) private _userSubmissionFid; // user => their submission FID
+    uint256[] private _allSubmissionFids; // Array of all submission FIDs
     
     mapping(uint256 => address[]) private _submissionVoters;
     mapping(uint256 => mapping(address => uint256)) private _submissionVotes;
+    mapping(address => bool) private _hasVoted; // Track if address has voted
     
-    // Staking: submissionId => address => stakeAmount (one stake per address per submission)
-    mapping(uint256 => mapping(address => uint256)) private _submissionStakes;
-    mapping(uint256 => mapping(address => bool)) private _stakesClaimed;
-    mapping(uint256 => address[]) private _submissionStakers; // Track stakers that staked
+    // Staking: submissionFid => fid => stakeAmount (one stake per FID per submission)
+    mapping(uint256 => mapping(uint256 => uint256)) private _submissionStakes;
+    mapping(uint256 => mapping(uint256 => bool)) private _stakesClaimed;
+    mapping(uint256 => uint256[]) private _submissionStakerFids; // Track FIDs that staked
+    mapping(uint256 => mapping(uint256 => address)) private _fidToAddress; // FID to address mapping per submission
+    mapping(uint256 => uint256) private _totalStakesByFid;
     
     mapping(bytes32 => bool) public usedSignatures;
 
@@ -111,15 +115,15 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // =============================================================
     
     event ContestCreated(address indexed creator, uint256 memePoolAmount, uint256 minEntriesRequired);
-    event SubmissionAdded(uint256 indexed submissionId, address indexed submitter, uint256 fid);
-    event VoteCast(uint256 indexed submissionId, address indexed voter, uint256 amount);
-    event StakePlaced(uint256 indexed submissionId, address indexed staker, uint256 amount);
+    event SubmissionAdded(uint256 indexed submissionFid, address indexed submitter, uint256 fid);
+    event VoteCast(uint256 indexed submissionFid, address indexed voter, uint256 amount);
+    event StakePlaced(uint256 indexed submissionFid, uint256 indexed fid, uint256 amount);
     event PhaseChanged(ContestPhase oldPhase, ContestPhase newPhase);
-    event WinnerDetermined(uint256 indexed submissionId, uint256 totalVotes);
+    event WinnerDetermined(uint256 indexed submissionFid, uint256 totalVotes);
     event ContestFailed(string reason);
-    event MemeRewardClaimed(uint256 indexed submissionId, uint256 amount);
+    event MemeRewardClaimed(uint256 indexed submissionFid, uint256 amount);
     event CreatorRewardClaimed(uint256 amount);
-    event StakerRewardClaimed(address indexed staker, uint256 amount);
+    event StakerRewardClaimed(uint256 indexed fid, uint256 amount);
 
     // =============================================================
     //                           ERRORS
@@ -129,9 +133,11 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     error InvalidAmount();
     error InvalidDuration();
     error InvalidString();
+    error NotAuthorized();
     error InvalidPhase();
     error DeadlinePassed();
     error SubmissionNotExists();
+    error AlreadySubmitted();
     error AlreadyVoted();
     error VoteAmountInvalid();
     error MaxStakeExceeded();
@@ -163,8 +169,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         _;
     }
 
-    modifier validSubmission(uint256 submissionId) {
-        if (!_submissions[submissionId].exists) revert SubmissionNotExists();
+    modifier validSubmission(uint256 submissionFid) {
+        if (!_submissions[submissionFid].exists) revert SubmissionNotExists();
         _;
     }
 
@@ -209,7 +215,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             phase: ContestPhase.SUBMISSION,
             submissionCount: 0,
             totalStakingPool: 0,
-            winningSubmissionId: 0,
+            winningSubmissionFid: 0,
             memeRewardClaimed: false,
             creatorRewardClaimed: false
         });
@@ -224,29 +230,26 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     function addSubmission(
         string calldata memeUrl,
         string calldata memeType,
-        string calldata submissionTitle,
-        string calldata submissionDescription,
         uint256 fid,
         bytes calldata platformSignature
     ) external onlyDuringSubmission nonReentrant whenNotPaused {
+        if (_hasSubmitted[msg.sender]) revert AlreadySubmitted();
+        if (_submissions[fid].exists) revert AlreadySubmitted();
+
         if (bytes(memeUrl).length == 0) revert InvalidString();
         if (bytes(memeType).length == 0 || bytes(memeType).length > 50) revert InvalidString();
-        if (bytes(submissionTitle).length > MAX_STRING_LENGTH) revert InvalidString();
         if (fid == 0) revert InvalidFID();
 
         bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), memeUrl, memeType, submissionTitle, msg.sender, fid
+            address(this), memeUrl, memeType, msg.sender, fid
         ));
         _validateSignature(messageHash, platformSignature);
 
-        uint256 submissionId = state.submissionCount;
-        _submissions[submissionId] = Submission({
+        _submissions[fid] = Submission({
             submitter: msg.sender,
             fid: fid,
             memeUrl: memeUrl,
             memeType: memeType,
-            title: submissionTitle,
-            description: submissionDescription,
             voteCount: 0,
             totalVoteAmount: 0,
             totalStakeAmount: 0,
@@ -254,10 +257,13 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             exists: true
         });
 
-        _userSubmissions[msg.sender].push(submissionId);
+        _hasSubmitted[msg.sender] = true;
+
         unchecked { ++state.submissionCount; }
 
-        emit SubmissionAdded(submissionId, msg.sender, fid);
+        _allSubmissionFids.push(fid);
+
+        emit SubmissionAdded(fid, msg.sender, fid);
 
         // Auto-transition to voting
         if (state.submissionCount >= config.minEntriesRequired) {
@@ -272,12 +278,13 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // =============================================================
     
     function vote(
-        uint256 submissionId,
+        uint256 submissionFid,
         uint256 voteAmount,
         uint256 fid,
         bytes calldata platformSignature
-    ) external onlyDuringVoting validSubmission(submissionId) nonReentrant whenNotPaused {
-        if (_submissionVotes[submissionId][msg.sender] > 0) revert AlreadyVoted();
+    ) external onlyDuringVoting validSubmission(submissionFid) nonReentrant whenNotPaused {
+        if (_hasVoted[msg.sender]) revert AlreadyVoted();
+        if (_submissionVotes[submissionFid][msg.sender] > 0) revert AlreadyVoted();
         if (fid == 0) revert InvalidFID();
         
         if (voteAmount < config.minVoteAmount || voteAmount > config.maxVoteAmount) {
@@ -285,20 +292,21 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         }
 
         bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), submissionId, voteAmount, msg.sender, fid
+            address(this), submissionFid, voteAmount, msg.sender, fid
         ));
         _validateSignature(messageHash, platformSignature);
 
         IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), voteAmount);
 
-        _submissionVotes[submissionId][msg.sender] = voteAmount;
+        _submissionVotes[submissionFid][msg.sender] = voteAmount;
+        _hasVoted[msg.sender] = true;
         state.totalStakingPool += voteAmount;
-        _submissionVoters[submissionId].push(msg.sender);
+        _submissionVoters[submissionFid].push(msg.sender);
 
-        unchecked { ++_submissions[submissionId].voteCount; }
-        _submissions[submissionId].totalVoteAmount += voteAmount;
+        unchecked { ++_submissions[submissionFid].voteCount; }
+        _submissions[submissionFid].totalVoteAmount += voteAmount;
 
-        emit VoteCast(submissionId, msg.sender, voteAmount);
+        emit VoteCast(submissionFid, msg.sender, voteAmount);
     }
 
     // =============================================================
@@ -306,37 +314,42 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     // =============================================================
     
     function stake(
-        uint256 submissionId,
+        uint256 submissionFid,
         uint256 stakeAmount,
         uint256 fid,
         bytes calldata platformSignature
-    ) external onlyDuringVoting validSubmission(submissionId) nonReentrant whenNotPaused {
+    ) external onlyDuringVoting validSubmission(submissionFid) nonReentrant whenNotPaused {
         if (stakeAmount == 0) revert InvalidAmount();
+        if (fid == 0) revert InvalidFID();
         
+        // One stake per FID per submission
+        if (_submissionStakes[submissionFid][fid] > 0) revert AlreadyStaked();
 
-        uint256 maxStakePerUser = (config.memePoolAmount * MAX_STAKE_PER_USER_PERCENT) / 100;
+        uint256 currentTotalStake = _totalStakesByFid[fid];
+        uint256 newTotalStake = currentTotalStake + stakeAmount;
         
-
-        bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this), submissionId, stakeAmount, msg.sender, fid
-        ));
-        _validateSignature(messageHash, platformSignature);
-
-        
-        uint256 currentAmount = _submissionStakes[submissionId][msg.sender];
-        if (currentAmount + stakeAmount > maxStakePerUser) {
+        uint256 maxTotalStakePerFid = (config.memePoolAmount * MAX_STAKE_PER_USER_PERCENT) / 100;
+        if (newTotalStake > maxTotalStakePerFid) {
             revert MaxStakeExceeded();
         }
 
-        _submissionStakes[submissionId][msg.sender] += stakeAmount;
-        _submissionStakers[submissionId].push(msg.sender);
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            address(this), submissionFid, stakeAmount, msg.sender, fid
+        ));
+        _validateSignature(messageHash, platformSignature);
 
         IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), stakeAmount);
+
+        _submissionStakes[submissionFid][fid] = stakeAmount;
+        _fidToAddress[submissionFid][fid] = msg.sender;
+        _submissionStakerFids[submissionFid].push(fid);
+
+        _totalStakesByFid[fid] = newTotalStake;
         
         state.totalStakingPool += stakeAmount;
-        _submissions[submissionId].totalStakeAmount += stakeAmount;
+        _submissions[submissionFid].totalStakeAmount += stakeAmount;
 
-        emit StakePlaced(submissionId, msg.sender, stakeAmount);
+        emit StakePlaced(submissionFid, fid, stakeAmount);
     }
 
     // =============================================================
@@ -363,66 +376,83 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                    REWARD DISTRIBUTION
     // =============================================================
     
-    function claimMemeWinnerReward() external onlyAfterVoting nonReentrant {
-        if (state.memeRewardClaimed) revert AlreadyClaimed();
+    function claimMemeWinnerReward(uint256 _fid) external onlyAfterVoting nonReentrant {
+    if (state.memeRewardClaimed) revert AlreadyClaimed();
+    if (_totalStakesByFid[_fid] < 0) revert NotAuthorized();
 
-        ContestPhase oldPhase = state.phase;
+    ContestPhase oldPhase = state.phase;
+    state.memeRewardClaimed = true;
 
-        uint256 winnerId;
-        uint256 highestScore;
-        uint256 highestVotes;
-        bool foundWinner;
+    uint256 winnerIndex = type(uint256).max; // index in _allSubmissionFids
+    uint256 winnerFid = 0;                   // actual FID of winning submission
+    uint256 highestScore = 0;
+    uint256 highestVotes = 0;
+    bool found = false;
 
-        for (uint256 i = 0; i < state.submissionCount; ) {
-            Submission storage s = _submissions[i];
+    uint256 len = _allSubmissionFids.length;
+    for (uint256 i = 0; i < len; ) {
+        uint256 fid = _allSubmissionFids[i];
+        Submission storage s = _submissions[fid];
 
-            // Weighted scoring formula
-            uint256 finalScore = 
-                (s.voteCount * ALPHA) + 
-                ((s.totalVoteAmount * BETA) / 1e18);
+        // finalScore = votes*ALPHA + voteAmount*BETA + stakeAmount*GAMMA
+        // all terms use 18-decimal scaling where needed.
+        uint256 scoreVotes = s.voteCount * ALPHA; // voteCount is integer, ALPHA scaled
+        uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18; // scale back
+        uint256 scoreStakeAmount = (s.totalStakeAmount * GAMMA) / 1e18;
 
-            // Determine winner using 3-tier tie-breaking:
-            // 1️⃣ Highest final score wins
-            // 2️⃣ If tied, higher voteCount wins
-            // 3️⃣ If still tied, earlier submission (lower i) wins
-            if (
-                finalScore > highestScore ||
-                (finalScore == highestScore && s.voteCount > highestVotes) ||
-                (finalScore == highestScore && s.voteCount == highestVotes && !foundWinner)
-            ) {
-                highestScore = finalScore;
-                highestVotes = s.voteCount;
-                winnerId = i;
-                foundWinner = true;
+        uint256 finalScore = scoreVotes + scoreVoteAmount + scoreStakeAmount;
+
+        // tie-break:
+        // 1) higher finalScore
+        // 2) if equal, higher voteCount
+        // 3) if equal, earlier submission (lower i)
+        bool takeWinner = false;
+        if (finalScore > highestScore) {
+            takeWinner = true;
+        } else if (finalScore == highestScore) {
+            if (s.voteCount > highestVotes) {
+                takeWinner = true;
+            } else if (s.voteCount == highestVotes) {
+                // earlier submission wins: smaller index i
+                if (!found || i < winnerIndex) {
+                    takeWinner = true;
+                }
             }
-
-            unchecked { ++i; }
         }
 
-        if (!foundWinner || highestScore == 0) {
-            state.phase = ContestPhase.FAILED;
-            emit PhaseChanged(oldPhase, ContestPhase.FAILED);
-            emit ContestFailed("No valid votes received");
-            _refundAll();
-            return;
+        if (takeWinner) {
+            highestScore = finalScore;
+            highestVotes = s.voteCount;
+            winnerIndex = i;
+            winnerFid = fid;
+            found = true;
         }
 
-        state.winningSubmissionId = winnerId;
-        state.phase = ContestPhase.ENDED;
-        state.memeRewardClaimed = true;
-
-        emit WinnerDetermined(winnerId, highestScore);
-        emit PhaseChanged(oldPhase, ContestPhase.ENDED);
-
-        IERC20(config.depeToken).safeTransfer(
-            _submissions[winnerId].submitter,
-            config.memePoolAmount
-        );
-
-        emit MemeRewardClaimed(winnerId, config.memePoolAmount);
+        unchecked { ++i; }
     }
 
+    if (!found || highestScore == 0) {
+        state.memeRewardClaimed = false;
+        state.phase = ContestPhase.FAILED;
+        emit PhaseChanged(oldPhase, ContestPhase.FAILED);
+        emit ContestFailed("No valid votes or stakes received");
+        _refundAll();
+        return;
+    }
 
+    // Save winner as FID (not index)
+    state.winningSubmissionFid = winnerFid;
+    state.phase = ContestPhase.ENDED;
+
+    emit WinnerDetermined(winnerFid, highestScore);
+    emit PhaseChanged(oldPhase, ContestPhase.ENDED);
+
+    // Transfer the meme pool to the winning submitter
+    address winnerAddr = _submissions[winnerFid].submitter;
+    IERC20(config.depeToken).safeTransfer(winnerAddr, config.memePoolAmount);
+
+    emit MemeRewardClaimed(winnerFid, config.memePoolAmount);
+}
 
     function claimCreatorReward() external onlyOwner onlyAfterVoting nonReentrant {
         if (state.creatorRewardClaimed) revert AlreadyClaimed();
@@ -438,23 +468,24 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         emit CreatorRewardClaimed(creatorReward);
     }
 
-    function claimStakerReward() external onlyAfterVoting nonReentrant {
+    function claimStakerReward(uint256 fid) external onlyAfterVoting nonReentrant {
         if (state.phase != ContestPhase.ENDED) revert InvalidPhase();
         
-        uint256 winningSubmissionId = state.winningSubmissionId;
-        uint256 stakeAmount = _submissionStakes[winningSubmissionId][msg.sender];
+        uint256 winningSubmissionFid = state.winningSubmissionFid;
+        uint256 stakeAmount = _submissionStakes[winningSubmissionFid][fid];
         
         if (stakeAmount == 0) revert NoStakeToClaim();
-        if (_stakesClaimed[winningSubmissionId][msg.sender]) revert AlreadyClaimed();
+        if (_fidToAddress[winningSubmissionFid][fid] != msg.sender) revert NotYourStake();
+        if (_stakesClaimed[winningSubmissionFid][fid]) revert AlreadyClaimed();
         
-        _stakesClaimed[winningSubmissionId][msg.sender] = true;
+        _stakesClaimed[winningSubmissionFid][fid] = true;
         
         uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
-        uint256 totalStakeAmount = _submissions[winningSubmissionId].totalStakeAmount;
+        uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
         uint256 stakerReward = (totalStakerReward * stakeAmount) / totalStakeAmount;
         
         IERC20(config.depeToken).safeTransfer(msg.sender, stakerReward);
-        emit StakerRewardClaimed(msg.sender, stakerReward);
+        emit StakerRewardClaimed(fid, stakerReward);
     }
 
     // =============================================================
@@ -471,7 +502,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         uint256 maxVoteAmount,
         uint256 minVoteAmount,
         uint256 votingDeadline,
-        uint256 winningSubmissionId
+        uint256 winningSubmissionFid
     ) {
         return (
             config.creator,
@@ -483,46 +514,61 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             config.maxVoteAmount,
             config.minVoteAmount,
             config.votingDeadline,
-            state.winningSubmissionId
+            state.winningSubmissionFid
         );
     }
 
-    function getSubmission(uint256 submissionId) external view validSubmission(submissionId) returns (Submission memory) {
-        return _submissions[submissionId];
+    function getSubmission(uint256 submissionFid) external view validSubmission(submissionFid) returns (Submission memory) {
+        return _submissions[submissionFid];
     }
 
-    function getUserSubmissions(address user) external view returns (uint256[] memory) {
-        return _userSubmissions[user];
+    function getAllSubmissions() external view returns (Submission[] memory) {
+        uint256[] memory allFids = _allSubmissionFids;
+        Submission[] memory submissions = new Submission[](allFids.length);
+        
+        for (uint256 i = 0; i < allFids.length; ) {
+            submissions[i] = _submissions[allFids[i]];
+            unchecked { ++i; }
+        }
+        
+        return submissions;
     }
 
-    function getUserVoteAmount(address user, uint256 submissionId) external view returns (uint256) {
-        return _submissionVotes[submissionId][user];
+    function getUserVoteAmount(address user, uint256 submissionFid) external view returns (uint256) {
+        return _submissionVotes[submissionFid][user];
     }
 
-    function getStakeAmount(uint256 submissionId, address staker) external view returns (uint256) {
-        return _submissionStakes[submissionId][staker];
+    function getStakeAmount(uint256 submissionFid, uint256 fid) external view returns (uint256) {
+        return _submissionStakes[submissionFid][fid];
     }
 
-    function isStakeClaimed(uint256 submissionId, address staker) external view returns (bool) {
-        return _stakesClaimed[submissionId][staker];
+    function isStakeClaimed(uint256 submissionFid, uint256 fid) external view returns (bool) {
+        return _stakesClaimed[submissionFid][fid];
     }
 
-    function getSubmissionStakers(uint256 submissionId) external view returns (address[] memory) {
-        return _submissionStakers[submissionId];
+    function getSubmissionStakerFids(uint256 submissionFid) external view returns (uint256[] memory) {
+        return _submissionStakerFids[submissionFid];
     }
 
-    function getClaimableStakerReward(address staker) external view returns (uint256) {
+    function getClaimableStakerReward(uint256 fid) external view returns (uint256) {
         if (state.phase != ContestPhase.ENDED) return 0;
         
-        uint256 winningSubmissionId = state.winningSubmissionId;
-        uint256 stakeAmount = _submissionStakes[winningSubmissionId][staker];
+        uint256 winningSubmissionFid = state.winningSubmissionFid;
+        uint256 stakeAmount = _submissionStakes[winningSubmissionFid][fid];
         
-        if (stakeAmount == 0 || _stakesClaimed[winningSubmissionId][staker]) return 0;
+        if (stakeAmount == 0 || _stakesClaimed[winningSubmissionFid][fid]) return 0;
         
         uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
-        uint256 totalStakeAmount = _submissions[winningSubmissionId].totalStakeAmount;
+        uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
         
         return (totalStakerReward * stakeAmount) / totalStakeAmount;
+    }
+
+    function getTimeRemaining() external view returns (uint256 timeLeft, bool hasEnded) {
+        if (block.timestamp >= config.votingDeadline) {
+            return (0, true);
+        }
+        return (config.votingDeadline - block.timestamp, false);
     }
 
     // =============================================================
@@ -547,35 +593,34 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     }
 
     function _refundAll() private {
-        _refundMemePool();
+    _refundMemePool();
+    
+    // Iterate over actual submission FIDs
+    for (uint256 i = 0; i < _allSubmissionFids.length; i++) {
+        uint256 submissionFid = _allSubmissionFids[i];
+        uint256[] memory fids = _submissionStakerFids[submissionFid];
         
-        // Refund all stakes
-        for (uint256 submissionId = 0; submissionId < state.submissionCount; ) {
-            address[] memory stakers = _submissionStakers[submissionId];
+        // Refund stakes
+        for (uint256 j = 0; j < fids.length; j++) {
+            uint256 fid = fids[j];
+            uint256 stakeAmount = _submissionStakes[submissionFid][fid];
+            address staker = _fidToAddress[submissionFid][fid];
             
-            for (uint256 i = 0; i < stakers.length; ) {
-                address stakerAddress = stakers[i];
-                uint256 stakeAmount = _submissionStakes[submissionId][stakerAddress];
-                address staker = stakerAddress;
-                
-                if (stakeAmount > 0 && staker != address(0)) {
-                    IERC20(config.depeToken).safeTransfer(staker, stakeAmount);
-                }
-                unchecked { ++i; }
+            if (stakeAmount > 0 && staker != address(0)) {
+                IERC20(config.depeToken).safeTransfer(staker, stakeAmount);
             }
+        }
+        
+        // Refund votes
+        address[] storage voters = _submissionVoters[submissionFid];
+        for (uint256 j = 0; j < voters.length; j++) {
+            address voter = voters[j];
+            uint256 voteAmount = _submissionVotes[submissionFid][voter];
             
-            // Refund all votes
-            address[] storage voters = _submissionVoters[submissionId];
-            for (uint256 i = 0; i < voters.length; ) {
-                address voter = voters[i];
-                uint256 voteAmount = _submissionVotes[submissionId][voter];
-                
-                if (voteAmount > 0) {
-                    IERC20(config.depeToken).safeTransfer(voter, voteAmount);
-                }
-                unchecked { ++i; }
+            if (voteAmount > 0) {
+                IERC20(config.depeToken).safeTransfer(voter, voteAmount);
             }
-            unchecked { ++submissionId; }
         }
     }
+}
 }

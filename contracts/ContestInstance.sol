@@ -105,7 +105,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     mapping(uint256 => mapping(uint256 => bool)) private _stakesClaimed;
     mapping(uint256 => uint256[]) private _submissionStakerFids; // Track FIDs that staked
     mapping(uint256 => mapping(uint256 => address)) private _fidToAddress; // FID to address mapping per submission
-    mapping(uint256 => uint256) private _totalStakesByFid;
+    mapping(uint256 => uint256) private _totalStakesByFid; // FIXED: Track total stakes per FID
     
     mapping(bytes32 => bool) public usedSignatures;
 
@@ -123,6 +123,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     event MemeRewardClaimed(uint256 indexed submissionFid, uint256 amount);
     event CreatorRewardClaimed(uint256 amount);
     event StakerRewardClaimed(uint256 indexed fid, uint256 amount);
+    event AllStakesRefunded(uint256 totalRefunded, string reason); // NEW EVENT
 
     // =============================================================
     //                           ERRORS
@@ -130,7 +131,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     
     error InvalidAddress();
     error InvalidAmount();
-    error NoWinnerYet();
     error InvalidDuration();
     error InvalidString();
     error NotAuthorized();
@@ -325,6 +325,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         // One stake per FID per submission
         if (_submissionStakes[submissionFid][fid] > 0) revert AlreadyStaked();
 
+        // FIXED: Check total stakes across ALL submissions by this FID
         uint256 currentTotalStake = _totalStakesByFid[fid];
         uint256 newTotalStake = currentTotalStake + stakeAmount;
         
@@ -344,6 +345,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         _fidToAddress[submissionFid][fid] = msg.sender;
         _submissionStakerFids[submissionFid].push(fid);
 
+        // FIXED: Update total stakes by this FID
         _totalStakesByFid[fid] = newTotalStake;
         
         state.totalStakingPool += stakeAmount;
@@ -438,6 +440,16 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             return;
         }
 
+        // ============================================================
+        // FIXED: CRITICAL SAFEGUARD - Check if winner has stakers
+        // ============================================================
+        uint256 totalStakeAmount = _submissions[winnerFid].totalStakeAmount;
+        if (totalStakeAmount == 0 && state.totalStakingPool > 0) {
+            // No one staked on the winner, refund all stakes
+            _refundAllStakes();
+        }
+        // ============================================================
+
         // Save winner as FID (not index)
         state.winningSubmissionFid = winnerFid;
         state.phase = ContestPhase.ENDED;
@@ -483,10 +495,43 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         
         uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
         uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
+        
+        // FIXED: Prevent division by zero
+        if (totalStakeAmount == 0) revert NoStakeToClaim();
+        
         uint256 stakerReward = (totalStakerReward * stakeAmount) / totalStakeAmount;
         
         IERC20(config.depeToken).safeTransfer(msg.sender, stakerReward);
         emit StakerRewardClaimed(fid, stakerReward);
+    }
+
+    /**
+     * @dev Refunds all stakes across all submissions without refunding votes
+     * Used when winning submission has no stakers
+     * Emits event for transparency
+     */
+    function _refundAllStakes() private {
+        uint256 totalRefunded = 0;
+        
+        // Iterate over all submission FIDs
+        for (uint256 i = 0; i < _allSubmissionFids.length; i++) {
+            uint256 submissionFid = _allSubmissionFids[i];
+            uint256[] memory fids = _submissionStakerFids[submissionFid];
+            
+            // Refund stakes for this submission
+            for (uint256 j = 0; j < fids.length; j++) {
+                uint256 fid = fids[j];
+                uint256 stakeAmount = _submissionStakes[submissionFid][fid];
+                address staker = _fidToAddress[submissionFid][fid];
+                
+                if (stakeAmount > 0 && staker != address(0)) {
+                    IERC20(config.depeToken).safeTransfer(staker, stakeAmount);
+                    totalRefunded += stakeAmount;
+                }
+            }
+        }
+        
+        emit AllStakesRefunded(totalRefunded, "Winner has no stakers");
     }
 
     // =============================================================
@@ -535,58 +580,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         return submissions;
     }
 
-
-    function getWinner() external view onlyAfterVoting returns (
-        uint256 winnerFid,
-        uint256 highestScore,
-        uint256 highestVotes
-    ) {
-
-        uint256 len = _allSubmissionFids.length;
-        if (len == 0) revert NoWinnerYet();
-
-        uint256 bestScore = 0;
-        uint256 bestVotes = 0;
-        uint256 bestFid = 0;
-        bool found = false;
-
-        for (uint256 i = 0; i < len; ) {
-            uint256 fid = _allSubmissionFids[i];
-            Submission storage s = _submissions[fid];
-
-            // Use same scoring formula as in claimMemeWinnerReward
-            // (without stake amount)
-            uint256 scoreVotes = s.voteCount * ALPHA;
-            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18;
-            uint256 finalScore = scoreVotes + scoreVoteAmount;
-
-            bool takeWinner = false;
-            if (finalScore > bestScore) {
-                takeWinner = true;
-            } else if (finalScore == bestScore) {
-                if (s.voteCount > bestVotes) {
-                    takeWinner = true;
-                } else if (s.voteCount == bestVotes && (!found || i < bestFid)) {
-                    takeWinner = true;
-                }
-            }
-
-            if (takeWinner) {
-                bestScore = finalScore;
-                bestVotes = s.voteCount;
-                bestFid = fid;
-                found = true;
-            }
-
-            unchecked { ++i; }
-        }
-
-        if (!found || bestScore == 0) revert NoWinnerYet();
-
-        return (bestFid, bestScore, bestVotes);
-    }
-
-
     function getUserVoteAmount(address user, uint256 submissionFid) external view returns (uint256) {
         return _submissionVotes[submissionFid][user];
     }
@@ -603,18 +596,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         return _submissionStakerFids[submissionFid];
     }
 
-    function getClaimableStakerReward(uint256 fid) external view returns (uint256) {
-        if (state.phase != ContestPhase.ENDED) return 0;
-        
-        uint256 winningSubmissionFid = state.winningSubmissionFid;
-        uint256 stakeAmount = _submissionStakes[winningSubmissionFid][fid];
-        
-        if (stakeAmount == 0 || _stakesClaimed[winningSubmissionFid][fid]) return 0;
-        
-        uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
-        uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
-        
-        return (totalStakerReward * stakeAmount) / totalStakeAmount;
+    // FIXED: Added view function to check total stakes by FID
+    function getTotalStakesByFid(uint256 fid) external view returns (uint256) {
+        return _totalStakesByFid[fid];
     }
 
     function getTimeRemaining() external view returns (uint256 timeLeft, bool hasEnded) {

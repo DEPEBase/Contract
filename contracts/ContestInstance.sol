@@ -11,8 +11,9 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
  * @title ContestInstance
- * @dev Contest contract with platform validation and optimized claiming
+ * @dev Contest contract with dual duration and automatic phase transitions
  * @author DEPE Team
+ * @notice Refactored with submission and contest deadlines for automatic phase management
  */
 contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     using ECDSA for bytes32;
@@ -58,7 +59,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         uint256 maxVoteAmount;
         uint256 minVoteAmount;
         uint256 minEntriesRequired;
-        uint256 votingDeadline;
+        uint256 submissionDeadline;  // When submissions end
+        uint256 contestDeadline;     // When voting/staking ends
     }
 
     struct ContestState {
@@ -91,23 +93,32 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     ContestConfig public config;
     ContestState public state;
     
-    mapping(uint256 => Submission) private _submissions; // fid => Submission
-    mapping(address => bool) private _hasSubmitted; // Track if address has submitted
-    mapping(address => uint256) private _userSubmissionFid; // user => their submission FID
-    uint256[] private _allSubmissionFids; // Array of all submission FIDs
+    mapping(uint256 => Submission) private _submissions;
+    mapping(address => bool) private _hasSubmitted;
+    mapping(address => uint256) private _userSubmissionFid;
+    uint256[] private _allSubmissionFids;
     
     mapping(uint256 => address[]) private _submissionVoters;
     mapping(uint256 => mapping(address => uint256)) private _submissionVotes;
-    mapping(address => bool) private _hasVoted; // Track if address has voted
+    mapping(address => bool) private _hasVoted;
     
-    // Staking: submissionFid => fid => stakeAmount (one stake per FID per submission)
     mapping(uint256 => mapping(uint256 => uint256)) private _submissionStakes;
     mapping(uint256 => mapping(uint256 => bool)) private _stakesClaimed;
-    mapping(uint256 => uint256[]) private _submissionStakerFids; // Track FIDs that staked
-    mapping(uint256 => mapping(uint256 => address)) private _fidToAddress; // FID to address mapping per submission
-    mapping(uint256 => uint256) private _totalStakesByFid; // FIXED: Track total stakes per FID
+    mapping(uint256 => uint256[]) private _submissionStakerFids;
+    mapping(uint256 => mapping(uint256 => address)) private _fidToAddress;
+    mapping(uint256 => uint256) private _totalStakesByFid;
     
     mapping(bytes32 => bool) public usedSignatures;
+
+    address[] private _allVoters;                    // Track all unique voters
+    address[] private _allStakerAddresses;          // Track all unique staker addresses
+    uint256[] private _allStakerFids;               // Track all unique staker FIDs
+    mapping(address => bool) private _isStaker;      // Quick staker check
+    mapping(uint256 => bool) private _fidHasStaked;  // Quick FID stake check
+    
+    // ✅ NEW: Pull-based refund system
+    mapping(address => uint256) private _pendingRefunds;
+    bool private _refundMode;
 
     // =============================================================
     //                           EVENTS
@@ -123,7 +134,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     event MemeRewardClaimed(uint256 indexed submissionFid, uint256 amount);
     event CreatorRewardClaimed(uint256 amount);
     event StakerRewardClaimed(uint256 indexed fid, uint256 amount);
-    event AllStakesRefunded(uint256 totalRefunded, string reason); // NEW EVENT
+    event AllStakesRefunded(uint256 totalRefunded, string reason);
+    event RefundClaimed(address indexed user, uint256 amount);
+    event RefundModeActivated(string reason);
 
     // =============================================================
     //                           ERRORS
@@ -148,24 +161,27 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     error AlreadyClaimed();
     error NotYourStake();
     error NoStakeToClaim();
+    error NoRefundAvailable();
 
     // =============================================================
     //                          MODIFIERS
     // =============================================================
     
     modifier onlyDuringSubmission() {
-        if (state.phase != ContestPhase.SUBMISSION) revert InvalidPhase();
+        if (block.timestamp >= config.submissionDeadline) revert InvalidPhase();
+        if (state.phase == ContestPhase.FAILED) revert InvalidPhase();
         _;
     }
 
     modifier onlyDuringVoting() {
-        if (state.phase != ContestPhase.VOTING) revert InvalidPhase();
-        if (block.timestamp > config.votingDeadline) revert DeadlinePassed();
+        if (block.timestamp < config.submissionDeadline) revert InvalidPhase();
+        if (block.timestamp >= config.contestDeadline) revert InvalidPhase();
+        if (state.phase == ContestPhase.FAILED || state.phase == ContestPhase.ENDED) revert InvalidPhase();
         _;
     }
 
-    modifier onlyAfterVoting() {
-        if (block.timestamp < config.votingDeadline) revert InvalidPhase();
+    modifier onlyAfterContest() {
+        if (block.timestamp < config.contestDeadline) revert InvalidPhase();
         _;
     }
 
@@ -184,7 +200,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         address _platformWallet,
         uint256 _memePoolAmount,
         uint256 _minEntriesRequired,
-        uint256 _duration,
+        uint256 _submissionDuration,
+        uint256 _contestDuration,
         string memory _title,
         string memory _description,
         uint256 _maxVoteAmount,
@@ -194,7 +211,12 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             revert InvalidAddress();
         }
         if (_memePoolAmount == 0 || _minEntriesRequired < 2) revert InvalidAmount();
-        if (_duration < 1 hours || _duration > 7 days) revert InvalidDuration();
+        
+        // Validate both durations
+        if (_submissionDuration < 1 hours) revert InvalidDuration();
+        if (_contestDuration < 1 hours || _contestDuration > 30 days) revert InvalidDuration();
+        if (_submissionDuration >= _contestDuration) revert InvalidDuration();
+        
         if (bytes(_title).length == 0 || bytes(_title).length > MAX_STRING_LENGTH) revert InvalidString();
         if (_maxVoteAmount == 0 || _minVoteAmount == 0 || _minVoteAmount > _maxVoteAmount) revert InvalidAmount();
 
@@ -206,7 +228,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             maxVoteAmount: _maxVoteAmount,
             minVoteAmount: _minVoteAmount,
             minEntriesRequired: _minEntriesRequired,
-            votingDeadline: block.timestamp + _duration
+            submissionDeadline: block.timestamp + _submissionDuration,
+            contestDeadline: block.timestamp + _contestDuration
         });
 
         state = ContestState({
@@ -221,6 +244,52 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         });
 
         emit ContestCreated(_creator, _memePoolAmount, _minEntriesRequired);
+    }
+
+    // =============================================================
+    //                   AUTOMATIC PHASE DETECTION
+    // =============================================================
+    
+    /**
+     * @dev Get current phase based on timestamps
+     * @return current The current computed phase
+     */
+    function getCurrentPhase() public view returns (ContestPhase current) {
+        // Respect manually set FAILED or ENDED states
+        if (state.phase == ContestPhase.FAILED || state.phase == ContestPhase.ENDED) {
+            return state.phase;
+        }
+        
+        // Automatic determination based on time
+        if (block.timestamp < config.submissionDeadline) {
+            return ContestPhase.SUBMISSION;
+        } else if (block.timestamp < config.contestDeadline) {
+            return ContestPhase.VOTING;
+        } else {
+            return ContestPhase.ENDED;
+        }
+    }
+
+    /**
+     * @dev Check if contest is in submission phase
+     */
+    function isSubmissionPhase() public view returns (bool) {
+        return getCurrentPhase() == ContestPhase.SUBMISSION;
+    }
+
+    /**
+     * @dev Check if contest is in voting phase
+     */
+    function isVotingPhase() public view returns (bool) {
+        return getCurrentPhase() == ContestPhase.VOTING;
+    }
+
+    /**
+     * @dev Check if contest has ended
+     */
+    function isEnded() public view returns (bool) {
+        ContestPhase current = getCurrentPhase();
+        return current == ContestPhase.ENDED || current == ContestPhase.FAILED;
     }
 
     // =============================================================
@@ -264,13 +333,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         _allSubmissionFids.push(fid);
 
         emit SubmissionAdded(fid, msg.sender, fid);
-
-        // Auto-transition to voting
-        if (state.submissionCount >= config.minEntriesRequired) {
-            ContestPhase oldPhase = state.phase;
-            state.phase = ContestPhase.VOTING;
-            emit PhaseChanged(oldPhase, ContestPhase.VOTING);
-        }
+        
+        // No auto-transition - handled by timestamps
     }
 
     // =============================================================
@@ -299,7 +363,13 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), voteAmount);
 
         _submissionVotes[submissionFid][msg.sender] = voteAmount;
-        _hasVoted[msg.sender] = true;
+        
+        // ✅ OPTIMIZED: Track voter globally on first vote
+        if (!_hasVoted[msg.sender]) {
+            _hasVoted[msg.sender] = true;
+            _allVoters.push(msg.sender);
+        }
+        
         state.totalStakingPool += voteAmount;
         _submissionVoters[submissionFid].push(msg.sender);
 
@@ -308,6 +378,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
         emit VoteCast(submissionFid, msg.sender, voteAmount);
     }
+
 
     // =============================================================
     //                       STAKING FUNCTIONS
@@ -322,10 +393,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         if (stakeAmount == 0) revert InvalidAmount();
         if (fid == 0) revert InvalidFID();
         
-        // One stake per FID per submission
         if (_submissionStakes[submissionFid][fid] > 0) revert AlreadyStaked();
 
-        // FIXED: Check total stakes across ALL submissions by this FID
         uint256 currentTotalStake = _totalStakesByFid[fid];
         uint256 newTotalStake = currentTotalStake + stakeAmount;
         
@@ -345,7 +414,17 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         _fidToAddress[submissionFid][fid] = msg.sender;
         _submissionStakerFids[submissionFid].push(fid);
 
-        // FIXED: Update total stakes by this FID
+        // ✅ OPTIMIZED: Track staker globally on first stake
+        if (!_isStaker[msg.sender]) {
+            _isStaker[msg.sender] = true;
+            _allStakerAddresses.push(msg.sender);
+        }
+        
+        if (!_fidHasStaked[fid]) {
+            _fidHasStaked[fid] = true;
+            _allStakerFids.push(fid);
+        }
+
         _totalStakesByFid[fid] = newTotalStake;
         
         state.totalStakingPool += stakeAmount;
@@ -358,19 +437,20 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                     PHASE MANAGEMENT
     // =============================================================
     
-    function endSubmissionPhase() external onlyOwner {
-        if (state.phase != ContestPhase.SUBMISSION) revert InvalidPhase();
-
-        ContestPhase oldPhase = state.phase;
+    /**
+     * @dev Manually fail contest if insufficient entries
+     * @notice Can only be called after submission deadline
+     */
+    function failContestIfInsufficientEntries() external onlyOwner {
+        if (block.timestamp < config.submissionDeadline) revert InvalidPhase();
+        if (state.phase == ContestPhase.FAILED || state.phase == ContestPhase.ENDED) revert InvalidPhase();
 
         if (state.submissionCount < config.minEntriesRequired) {
+            ContestPhase oldPhase = state.phase;
             state.phase = ContestPhase.FAILED;
             emit PhaseChanged(oldPhase, ContestPhase.FAILED);
             emit ContestFailed("Not enough submissions");
             _refundMemePool();
-        } else {
-            state.phase = ContestPhase.VOTING;
-            emit PhaseChanged(oldPhase, ContestPhase.VOTING);
         }
     }
 
@@ -378,33 +458,40 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                    REWARD DISTRIBUTION
     // =============================================================
     
-    function claimMemeWinnerReward() external onlyAfterVoting nonReentrant {
+    function claimMemeWinnerReward() external onlyAfterContest nonReentrant {
         if (state.memeRewardClaimed) revert AlreadyClaimed();
+        
+        // Check if contest has enough submissions
+        if (state.submissionCount < config.minEntriesRequired) {
+            state.phase = ContestPhase.FAILED;
+            state.memeRewardClaimed = true;
+            emit ContestFailed("Not enough submissions");
+            _refundMemePool();
+            _refundAll();
+            return;
+        }
 
         ContestPhase oldPhase = state.phase;
         state.memeRewardClaimed = true;
 
-        uint256 winnerIndex = type(uint256).max; // index in _allSubmissionFids
-        uint256 winnerFid = 0;                   // actual FID of winning submission
+        uint256 winnerIndex = type(uint256).max;
+        uint256 winnerFid = 0;
         uint256 highestScore = 0;
         uint256 highestVotes = 0;
         bool found = false;
 
         uint256 len = _allSubmissionFids.length;
+        
+        // ✅ OPTIMIZED: Cache array length
         for (uint256 i = 0; i < len; ) {
             uint256 fid = _allSubmissionFids[i];
             Submission storage s = _submissions[fid];
 
-            // finalScore = votes * ALPHA + voteAmount * BETA
-            uint256 scoreVotes = s.voteCount * ALPHA; // scaled
-            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18; // scaled
+            uint256 scoreVotes = s.voteCount * ALPHA;
+            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18;
 
             uint256 finalScore = scoreVotes + scoreVoteAmount;
 
-            // tie-break rules:
-            // 1) higher finalScore
-            // 2) if equal, higher voteCount
-            // 3) if equal, earlier submission (lower i)
             bool takeWinner = false;
             if (finalScore > highestScore) {
                 takeWinner = true;
@@ -412,7 +499,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
                 if (s.voteCount > highestVotes) {
                     takeWinner = true;
                 } else if (s.voteCount == highestVotes) {
-                    // earlier submission wins
                     if (!found || i < winnerIndex) {
                         takeWinner = true;
                     }
@@ -430,7 +516,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             unchecked { ++i; }
         }
 
-        // if no valid votes or no submission found
         if (!found || highestScore == 0) {
             state.memeRewardClaimed = false;
             state.phase = ContestPhase.FAILED;
@@ -440,24 +525,18 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             return;
         }
 
-        // ============================================================
-        // FIXED: CRITICAL SAFEGUARD - Check if winner has stakers
-        // ============================================================
+        // Check if winner has stakers
         uint256 totalStakeAmount = _submissions[winnerFid].totalStakeAmount;
         if (totalStakeAmount == 0 && state.totalStakingPool > 0) {
-            // No one staked on the winner, refund all stakes
-            _refundAllStakes();
+            _refundAllStakesAndVotes();
         }
-        // ============================================================
 
-        // Save winner as FID (not index)
         state.winningSubmissionFid = winnerFid;
         state.phase = ContestPhase.ENDED;
 
         emit WinnerDetermined(winnerFid, highestScore);
         emit PhaseChanged(oldPhase, ContestPhase.ENDED);
 
-        // Transfer the meme pool to the winning submitter
         address winnerAddr = _submissions[winnerFid].submitter;
         if (msg.sender != winnerAddr) revert NotAuthorized();
 
@@ -467,7 +546,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     }
 
 
-    function claimCreatorReward() external onlyOwner onlyAfterVoting nonReentrant {
+    function claimCreatorReward() external onlyOwner onlyAfterContest nonReentrant {
         if (state.creatorRewardClaimed) revert AlreadyClaimed();
         if (state.phase != ContestPhase.ENDED) revert InvalidPhase();
         
@@ -481,7 +560,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         emit CreatorRewardClaimed(creatorReward);
     }
 
-    function claimStakerReward(uint256 fid) external onlyAfterVoting nonReentrant {
+    function claimStakerReward(uint256 fid) external onlyAfterContest nonReentrant {
         if (state.phase != ContestPhase.ENDED) revert InvalidPhase();
         
         uint256 winningSubmissionFid = state.winningSubmissionFid;
@@ -496,7 +575,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
         uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
         
-        // FIXED: Prevent division by zero
         if (totalStakeAmount == 0) revert NoStakeToClaim();
         
         uint256 stakerReward = (totalStakerReward * stakeAmount) / totalStakeAmount;
@@ -506,32 +584,18 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     }
 
     /**
-     * @dev Refunds all stakes across all submissions without refunding votes
-     * Used when winning submission has no stakers
-     * Emits event for transparency
+     * @dev Users claim their refunds (pull pattern - gas efficient)
      */
-    function _refundAllStakes() private {
-        uint256 totalRefunded = 0;
+    function claimRefund() external nonReentrant {
+        if (!_refundMode) revert NoRefundAvailable();
         
-        // Iterate over all submission FIDs
-        for (uint256 i = 0; i < _allSubmissionFids.length; i++) {
-            uint256 submissionFid = _allSubmissionFids[i];
-            uint256[] memory fids = _submissionStakerFids[submissionFid];
-            
-            // Refund stakes for this submission
-            for (uint256 j = 0; j < fids.length; j++) {
-                uint256 fid = fids[j];
-                uint256 stakeAmount = _submissionStakes[submissionFid][fid];
-                address staker = _fidToAddress[submissionFid][fid];
-                
-                if (stakeAmount > 0 && staker != address(0)) {
-                    IERC20(config.depeToken).safeTransfer(staker, stakeAmount);
-                    totalRefunded += stakeAmount;
-                }
-            }
-        }
+        uint256 amount = _pendingRefunds[msg.sender];
+        if (amount == 0) revert NoRefundAvailable();
         
-        emit AllStakesRefunded(totalRefunded, "Winner has no stakers");
+        _pendingRefunds[msg.sender] = 0;
+        IERC20(config.depeToken).safeTransfer(msg.sender, amount);
+        
+        emit RefundClaimed(msg.sender, amount);
     }
 
     // =============================================================
@@ -547,7 +611,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         ContestPhase phase,
         uint256 maxVoteAmount,
         uint256 minVoteAmount,
-        uint256 votingDeadline,
+        uint256 submissionDeadline,
+        uint256 contestDeadline,
         uint256 winningSubmissionFid
     ) {
         return (
@@ -556,10 +621,11 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             state.totalStakingPool,
             config.minEntriesRequired,
             state.submissionCount,
-            state.phase,
+            getCurrentPhase(),
             config.maxVoteAmount,
             config.minVoteAmount,
-            config.votingDeadline,
+            config.submissionDeadline,
+            config.contestDeadline,
             state.winningSubmissionFid
         );
     }
@@ -569,15 +635,43 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     }
 
     function getAllSubmissions() external view returns (Submission[] memory) {
-        uint256[] memory allFids = _allSubmissionFids;
-        Submission[] memory submissions = new Submission[](allFids.length);
+        uint256 length = _allSubmissionFids.length;
+        Submission[] memory submissions = new Submission[](length);
         
-        for (uint256 i = 0; i < allFids.length; ) {
-            submissions[i] = _submissions[allFids[i]];
+        for (uint256 i = 0; i < length; ) {
+            submissions[i] = _submissions[_allSubmissionFids[i]];
             unchecked { ++i; }
         }
         
         return submissions;
+    }
+
+    /**
+     * @dev Check pending refund for an address
+     */
+    function getPendingRefund(address user) external view returns (uint256) {
+        return _pendingRefunds[user];
+    }
+
+    /**
+     * @dev Check if refund mode is active
+     */
+    function isRefundMode() external view returns (bool) {
+        return _refundMode;
+    }
+
+    /**
+     * @dev Get voter count - O(1)
+     */
+    function getVoterCount() external view returns (uint256) {
+        return _allVoters.length;
+    }
+
+    /**
+     * @dev Get staker count - O(1)
+     */
+    function getStakerCount() external view returns (uint256) {
+        return _allStakerFids.length;
     }
 
     function getUserVoteAmount(address user, uint256 submissionFid) external view returns (uint256) {
@@ -596,16 +690,304 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         return _submissionStakerFids[submissionFid];
     }
 
-    // FIXED: Added view function to check total stakes by FID
     function getTotalStakesByFid(uint256 fid) external view returns (uint256) {
         return _totalStakesByFid[fid];
     }
 
-    function getTimeRemaining() external view returns (uint256 timeLeft, bool hasEnded) {
-        if (block.timestamp >= config.votingDeadline) {
-            return (0, true);
+    function getClaimableStakerReward(uint256 fid) external view returns (uint256) {
+        if (state.phase != ContestPhase.ENDED) return 0;
+        
+        uint256 winningSubmissionFid = state.winningSubmissionFid;
+        uint256 stakeAmount = _submissionStakes[winningSubmissionFid][fid];
+        
+        if (stakeAmount == 0 || _stakesClaimed[winningSubmissionFid][fid]) return 0;
+        
+        uint256 totalStakerReward = (state.totalStakingPool * STAKERS_PERCENT) / BASIS_POINTS;
+        uint256 totalStakeAmount = _submissions[winningSubmissionFid].totalStakeAmount;
+        
+        if (totalStakeAmount == 0) return 0;
+        
+        return (totalStakerReward * stakeAmount) / totalStakeAmount;
+    }
+
+    /**
+     * @dev Get time remaining for current phase
+     */
+    function getTimeRemaining() external view returns (
+        uint256 timeLeft,
+        string memory currentPhaseName
+    ) {
+        ContestPhase phase = getCurrentPhase();
+        
+        if (phase == ContestPhase.SUBMISSION) {
+            if (block.timestamp >= config.submissionDeadline) {
+                return (0, "VOTING");
+            }
+            return (config.submissionDeadline - block.timestamp, "SUBMISSION");
+        } else if (phase == ContestPhase.VOTING) {
+            if (block.timestamp >= config.contestDeadline) {
+                return (0, "ENDED");
+            }
+            return (config.contestDeadline - block.timestamp, "VOTING");
+        } else if (phase == ContestPhase.ENDED) {
+            return (0, "ENDED");
+        } else {
+            return (0, "FAILED");
         }
-        return (config.votingDeadline - block.timestamp, false);
+    }
+
+    /**
+     * @dev Get both deadlines and time remaining
+     */
+    function getDeadlines() external view returns (
+        uint256 submissionDeadline,
+        uint256 contestDeadline,
+        uint256 submissionTimeLeft,
+        uint256 votingTimeLeft
+    ) {
+        submissionDeadline = config.submissionDeadline;
+        contestDeadline = config.contestDeadline;
+        
+        if (block.timestamp < config.submissionDeadline) {
+            submissionTimeLeft = config.submissionDeadline - block.timestamp;
+            votingTimeLeft = config.contestDeadline - block.timestamp;
+        } else if (block.timestamp < config.contestDeadline) {
+            submissionTimeLeft = 0;
+            votingTimeLeft = config.contestDeadline - block.timestamp;
+        } else {
+            submissionTimeLeft = 0;
+            votingTimeLeft = 0;
+        }
+        
+        return (submissionDeadline, contestDeadline, submissionTimeLeft, votingTimeLeft);
+    }
+
+    /**
+     * @dev Get voting duration (time between submission and contest deadlines)
+     */
+    function getVotingDuration() external view returns (uint256) {
+        return config.contestDeadline - config.submissionDeadline;
+    }
+
+    /**
+     * @dev Get all voters for a specific submission with their vote amounts
+     * @param submissionFid The submission FID
+     * @return voters Array of voter addresses
+     * @return amounts Array of vote amounts corresponding to each voter
+     */
+    function getSubmissionVoters(uint256 submissionFid) 
+        external 
+        view 
+        validSubmission(submissionFid) 
+        returns (address[] memory voters, uint256[] memory amounts) 
+    {
+        address[] memory voterAddresses = _submissionVoters[submissionFid];
+        uint256 length = voterAddresses.length;
+        uint256[] memory voteAmounts = new uint256[](length);
+        
+        for (uint256 i = 0; i < length; ) {
+            voteAmounts[i] = _submissionVotes[submissionFid][voterAddresses[i]];
+            unchecked { ++i; }
+        }
+        
+        return (voterAddresses, voteAmounts);
+    }
+
+    /**
+     * @dev Get all stakers for a specific submission with their stake amounts
+     * @param submissionFid The submission FID
+     * @return fids Array of staker FIDs
+     * @return addresses Array of staker addresses
+     * @return amounts Array of stake amounts corresponding to each staker
+     */
+    function getSubmissionStakers(uint256 submissionFid) 
+        external 
+        view 
+        validSubmission(submissionFid) 
+        returns (
+            uint256[] memory fids, 
+            address[] memory addresses, 
+            uint256[] memory amounts
+        ) 
+    {
+        uint256[] memory stakerFids = _submissionStakerFids[submissionFid];
+        uint256 length = stakerFids.length;
+        address[] memory stakerAddresses = new address[](length);
+        uint256[] memory stakeAmounts = new uint256[](length);
+        
+        for (uint256 i = 0; i < length; ) {
+            uint256 fid = stakerFids[i];
+            stakerAddresses[i] = _fidToAddress[submissionFid][fid];
+            stakeAmounts[i] = _submissionStakes[submissionFid][fid];
+            unchecked { ++i; }
+        }
+        
+        return (stakerFids, stakerAddresses, stakeAmounts);
+    }
+
+    /**
+     * @dev Get all voters across all submissions in the contest
+     * @return allVoters Array of unique voter addresses
+     * @return totalVoted Total amount voted by each voter across all submissions
+     */
+    function getAllVoters() external view returns (
+        address[] memory allVoters,
+        uint256[] memory totalVoted
+    ) {
+        uint256 count = _allVoters.length;
+        allVoters = new address[](count);
+        totalVoted = new uint256[](count);
+        
+        uint256 submissionCount = _allSubmissionFids.length;
+        
+        for (uint256 i = 0; i < count; ) {
+            address voter = _allVoters[i];
+            allVoters[i] = voter;
+            
+            // Calculate total voted by this voter
+            for (uint256 j = 0; j < submissionCount; ) {
+                totalVoted[i] += _submissionVotes[_allSubmissionFids[j]][voter];
+                unchecked { ++j; }
+            }
+            unchecked { ++i; }
+        }
+        
+        return (allVoters, totalVoted);
+    }
+
+    /**
+     * @dev Get all stakers across all submissions in the contest
+     * @return allFids Array of unique staker FIDs
+     * @return allAddresses Array of staker addresses corresponding to FIDs
+     * @return totalStaked Total amount staked by each FID across all submissions
+     */
+    function getAllStakers() external view returns (
+        uint256[] memory allFids,
+        address[] memory allAddresses,
+        uint256[] memory totalStaked
+    ) {
+        uint256 count = _allStakerFids.length;
+        allFids = new uint256[](count);
+        allAddresses = new address[](count);
+        totalStaked = new uint256[](count);
+        
+        for (uint256 i = 0; i < count; ) {
+            uint256 fid = _allStakerFids[i];
+            allFids[i] = fid;
+            totalStaked[i] = _totalStakesByFid[fid];
+            
+            // Get address from first submission where this FID staked
+            uint256 submissionCount = _allSubmissionFids.length;
+            for (uint256 j = 0; j < submissionCount; ) {
+                uint256 submissionFid = _allSubmissionFids[j];
+                if (_submissionStakes[submissionFid][fid] > 0) {
+                    allAddresses[i] = _fidToAddress[submissionFid][fid];
+                    break;
+                }
+                unchecked { ++j; }
+            }
+            
+            unchecked { ++i; }
+        }
+        
+        return (allFids, allAddresses, totalStaked);
+    }
+
+    /**
+     * @dev Get voter info for a specific address across all submissions
+     * @param voter The voter address
+     * @return submissionFids Array of submission FIDs voted on
+     * @return amounts Array of amounts voted on each submission
+     * @return totalAmount Total amount voted across all submissions
+     */
+    function getVoterInfo(address voter) external view returns (
+        uint256[] memory submissionFids,
+        uint256[] memory amounts,
+        uint256 totalAmount
+    ) {
+        // Count how many submissions this voter voted on
+        uint256 voteCount = 0;
+        uint256 submissionCount = _allSubmissionFids.length;
+        
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 fid = _allSubmissionFids[i];
+            if (_submissionVotes[fid][voter] > 0) {
+                unchecked { ++voteCount; }
+            }
+            unchecked { ++i; }
+        }
+        
+        // Create arrays
+        submissionFids = new uint256[](voteCount);
+        amounts = new uint256[](voteCount);
+        uint256 index = 0;
+        
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 fid = _allSubmissionFids[i];
+            uint256 amount = _submissionVotes[fid][voter];
+            
+            if (amount > 0) {
+                submissionFids[index] = fid;
+                amounts[index] = amount;
+                totalAmount += amount;
+                unchecked { ++index; }
+            }
+            unchecked { ++i; }
+        }
+        
+        return (submissionFids, amounts, totalAmount);
+    }
+
+    /**
+     * @dev Get staker info for a specific FID across all submissions
+     * @param fid The staker FID
+     * @return submissionFids Array of submission FIDs staked on
+     * @return amounts Array of amounts staked on each submission
+     * @return totalAmount Total amount staked across all submissions
+     * @return stakerAddress Address associated with this FID
+     */
+    function getStakerInfo(uint256 fid) external view returns (
+        uint256[] memory submissionFids,
+        uint256[] memory amounts,
+        uint256 totalAmount,
+        address stakerAddress
+    ) {
+        // Count how many submissions this FID staked on
+        uint256 stakeCount = 0;
+        uint256 submissionCount = _allSubmissionFids.length;
+        
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 submissionFid = _allSubmissionFids[i];
+            if (_submissionStakes[submissionFid][fid] > 0) {
+                unchecked { ++stakeCount; }
+            }
+            unchecked { ++i; }
+        }
+        
+        // Create arrays
+        submissionFids = new uint256[](stakeCount);
+        amounts = new uint256[](stakeCount);
+        uint256 index = 0;
+        
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 submissionFid = _allSubmissionFids[i];
+            uint256 amount = _submissionStakes[submissionFid][fid];
+            
+            if (amount > 0) {
+                submissionFids[index] = submissionFid;
+                amounts[index] = amount;
+                totalAmount += amount;
+                
+                if (stakerAddress == address(0)) {
+                    stakerAddress = _fidToAddress[submissionFid][fid];
+                }
+                
+                unchecked { ++index; }
+            }
+            unchecked { ++i; }
+        }
+        
+        return (submissionFids, amounts, totalAmount, stakerAddress);
     }
 
     // =============================================================
@@ -629,35 +1011,98 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         }
     }
 
-    function _refundAll() private {
-    _refundMemePool();
-    
-    // Iterate over actual submission FIDs
-    for (uint256 i = 0; i < _allSubmissionFids.length; i++) {
-        uint256 submissionFid = _allSubmissionFids[i];
-        uint256[] memory fids = _submissionStakerFids[submissionFid];
+    // =============================================================
+    //               PULL-BASED REFUND SYSTEM
+    // =============================================================
+
+    /**
+     * @dev Calculate and store refunds instead of sending (gas-efficient)
+     */
+    function _refundAllStakesAndVotes() private {
+        _refundMode = true;
+        emit RefundModeActivated("Winner has no stakers");
         
-        // Refund stakes
-        for (uint256 j = 0; j < fids.length; j++) {
-            uint256 fid = fids[j];
-            uint256 stakeAmount = _submissionStakes[submissionFid][fid];
-            address staker = _fidToAddress[submissionFid][fid];
-            
-            if (stakeAmount > 0 && staker != address(0)) {
-                IERC20(config.depeToken).safeTransfer(staker, stakeAmount);
-            }
-        }
+        uint256 submissionCount = _allSubmissionFids.length;
         
-        // Refund votes
-        address[] storage voters = _submissionVoters[submissionFid];
-        for (uint256 j = 0; j < voters.length; j++) {
-            address voter = voters[j];
-            uint256 voteAmount = _submissionVotes[submissionFid][voter];
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 submissionFid = _allSubmissionFids[i];
             
-            if (voteAmount > 0) {
-                IERC20(config.depeToken).safeTransfer(voter, voteAmount);
+            // Calculate stake refunds
+            uint256[] memory fids = _submissionStakerFids[submissionFid];
+            uint256 fidsLength = fids.length;
+            
+            for (uint256 j = 0; j < fidsLength; ) {
+                uint256 fid = fids[j];
+                uint256 stakeAmount = _submissionStakes[submissionFid][fid];
+                address staker = _fidToAddress[submissionFid][fid];
+                
+                if (stakeAmount > 0 && staker != address(0)) {
+                    _pendingRefunds[staker] += stakeAmount;
+                }
+                unchecked { ++j; }
             }
+            
+            // Calculate vote refunds
+            address[] storage voters = _submissionVoters[submissionFid];
+            uint256 votersLength = voters.length;
+            
+            for (uint256 j = 0; j < votersLength; ) {
+                address voter = voters[j];
+                uint256 voteAmount = _submissionVotes[submissionFid][voter];
+                
+                if (voteAmount > 0) {
+                    _pendingRefunds[voter] += voteAmount;
+                }
+                unchecked { ++j; }
+            }
+            
+            unchecked { ++i; }
         }
     }
-}
+
+    /**
+     * @dev Refund all - OPTIMIZED with pull pattern
+     */
+    function _refundAll() private {
+        _refundMemePool();
+        _refundMode = true;
+        emit RefundModeActivated("Contest failed");
+        
+        uint256 submissionCount = _allSubmissionFids.length;
+        
+        for (uint256 i = 0; i < submissionCount; ) {
+            uint256 submissionFid = _allSubmissionFids[i];
+            
+            // Calculate stake refunds
+            uint256[] memory fids = _submissionStakerFids[submissionFid];
+            uint256 fidsLength = fids.length;
+            
+            for (uint256 j = 0; j < fidsLength; ) {
+                uint256 fid = fids[j];
+                uint256 stakeAmount = _submissionStakes[submissionFid][fid];
+                address staker = _fidToAddress[submissionFid][fid];
+                
+                if (stakeAmount > 0 && staker != address(0)) {
+                    _pendingRefunds[staker] += stakeAmount;
+                }
+                unchecked { ++j; }
+            }
+            
+            // Calculate vote refunds
+            address[] storage voters = _submissionVoters[submissionFid];
+            uint256 votersLength = voters.length;
+            
+            for (uint256 j = 0; j < votersLength; ) {
+                address voter = voters[j];
+                uint256 voteAmount = _submissionVotes[submissionFid][voter];
+                
+                if (voteAmount > 0) {
+                    _pendingRefunds[voter] += voteAmount;
+                }
+                unchecked { ++j; }
+            }
+            
+            unchecked { ++i; }
+        }
+    }
 }

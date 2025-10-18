@@ -18,6 +18,8 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== CONSTANTS =====
     uint256 private constant MAX_CONTEST_DURATION = 30 days;
     uint256 private constant MIN_CONTEST_DURATION = 1 hours;
+    uint256 private constant MIN_SUBMISSION_DURATION = 1 hours;
+    uint256 private constant MAX_SUBMISSION_DURATION = 6 days;
     uint256 private constant MAX_STRING_LENGTH = 500;
     uint256 private constant MAX_TITLE_LENGTH = 100;
     uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
@@ -122,53 +124,63 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== CONTEST CREATION =====
     
     /**
-     * @dev Create a new contest with deterministic address
-     * @param totalPoolAmount Total amount of DEPE (platform fee will be deducted)
-     * @param minEntriesRequired Minimum entries required for contest to be valid
-     * @param duration Contest duration in seconds
-     * @param title Contest title
-     * @param description Contest description
-     * @return contestAddress Address of the created contest
-     */
+    * @dev Create a new contest with dual duration support
+    * @param totalPoolAmount Total amount of DEPE (platform fee will be deducted)
+    * @param minEntriesRequired Minimum entries required for contest to be valid
+    * @param submissionDuration Duration for submission phase in seconds
+    * @param contestDuration Total contest duration (submission + voting) in seconds
+    * @param title Contest title
+    * @param description Contest description
+    * @return contestAddress Address of the created contest
+    */
     function createContest(
-        uint256 totalPoolAmount,
-        uint256 minEntriesRequired,
-        uint256 duration,
-        string calldata title,
-        string calldata description
-    ) 
-        external 
-        nonReentrant 
-        whenNotPaused
-        returns (address contestAddress) 
-    {
-        // Comprehensive parameter validation
-        _validateContestParameters(totalPoolAmount, duration, title, description);
-        
-        // Process fees and transfers
-        uint256 netPoolAmount = _processFees(totalPoolAmount);
-        
-        // Deploy contest
-        contestAddress = _deployContest(
-            netPoolAmount,
-            minEntriesRequired,
-            duration,
-            title,
-            description
-        );
-        
-        // Store contest and emit events
-        _finalizeContestCreation(
-            contestAddress,
-            totalPoolAmount,
-            netPoolAmount,
-            minEntriesRequired,
-            duration,
-            title
-        );
-        
-        return contestAddress;
-    }
+    uint256 totalPoolAmount,
+    uint256 minEntriesRequired,
+    uint256 submissionDuration,  // NEW PARAMETER
+    uint256 contestDuration,     // RENAMED from duration
+    string calldata title,
+    string calldata description
+) 
+    external 
+    nonReentrant 
+    whenNotPaused
+    returns (address contestAddress) 
+{
+    // Comprehensive parameter validation
+    _validateContestParameters(
+        totalPoolAmount,
+        submissionDuration,
+        contestDuration,
+        title,
+        description
+    );
+    
+    // Process fees and transfers
+    uint256 netPoolAmount = _processFees(totalPoolAmount);
+    
+    // Deploy contest with dual durations
+    contestAddress = _deployContest(
+        netPoolAmount,
+        minEntriesRequired,
+        submissionDuration,
+        contestDuration,
+        title,
+        description
+    );
+    
+    // Store contest and emit events
+    _finalizeContestCreation(
+        contestAddress,
+        totalPoolAmount,
+        netPoolAmount,
+        minEntriesRequired,
+        submissionDuration,
+        contestDuration,
+        title
+    );
+    
+    return contestAddress;
+}
 
     // ===== CONTEST MANAGEMENT =====
     
@@ -364,32 +376,41 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== INTERNAL FUNCTIONS =====
     
     function _validateContestParameters(
-        uint256 totalPoolAmount,
-        uint256 duration,
-        string calldata title,
-        string calldata description
-    ) private  {
-        // Amount validation (validate total amount, not net amount)
-        if (totalPoolAmount < config.minPoolDEPE) revert PoolBelowMinimum();
-        
-        // Ensure net amount after fee is still meaningful
-        uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
-        uint256 netAmount = totalPoolAmount - platformFee;
-        if (netAmount < (config.minPoolDEPE * 90) / 100) revert PoolBelowMinimum(); // Net should be at least 90% of minimum
-        emit durationLog(duration, MIN_CONTEST_DURATION, MAX_CONTEST_DURATION);
-        // Duration validation
-        if (duration < MIN_CONTEST_DURATION || duration > MAX_CONTEST_DURATION) {
-            revert InvalidDuration();
-        }
-        
-        // String validation
-        if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {
-            revert InvalidString();
-        }
-        if (bytes(description).length > MAX_STRING_LENGTH) {
-            revert InvalidString();
-        }
+    uint256 totalPoolAmount,
+    uint256 submissionDuration,
+    uint256 contestDuration,
+    string calldata title,
+    string calldata description
+) private view {
+    // Amount validation
+    if (totalPoolAmount < config.minPoolDEPE) revert PoolBelowMinimum();
+    
+    // Ensure net amount after fee is still meaningful
+    uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
+    uint256 netAmount = totalPoolAmount - platformFee;
+    if (netAmount < (config.minPoolDEPE * 90) / 100) revert PoolBelowMinimum();
+    
+    // Duration validation - NEW LOGIC
+    if (submissionDuration < MIN_SUBMISSION_DURATION) revert InvalidDuration();
+    if (submissionDuration > MAX_SUBMISSION_DURATION) revert InvalidDuration();
+    if (contestDuration < MIN_CONTEST_DURATION) revert InvalidDuration();
+    if (contestDuration > MAX_CONTEST_DURATION) revert InvalidDuration();
+    
+    // CRITICAL: Submission duration must be less than total contest duration
+    if (submissionDuration >= contestDuration) revert InvalidDuration();
+    
+    // Ensure voting phase has reasonable duration (at least 1 hour)
+    uint256 votingDuration = contestDuration - submissionDuration;
+    if (votingDuration < 1 hours) revert InvalidDuration();
+    
+    // String validation
+    if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {
+        revert InvalidString();
     }
+    if (bytes(description).length > MAX_STRING_LENGTH) {
+        revert InvalidString();
+    }
+}
 
     function _processFees(uint256 totalPoolAmount) private returns (uint256 netPoolAmount) {
         // Calculate platform fee and net pool amount
@@ -409,11 +430,12 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     }
 
     function _deployContest(
-        uint256 netPoolAmount,
-        uint256 minEntriesRequired,
-        uint256 duration,
-        string calldata title,
-        string calldata description
+    uint256 netPoolAmount,
+    uint256 minEntriesRequired,
+    uint256 submissionDuration,
+    uint256 contestDuration,
+    string calldata title,
+    string calldata description
     ) private returns (address) {
         ContestInstance contestInstance = new ContestInstance(
             config.depeToken,
@@ -421,7 +443,8 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             config.platformWallet,
             netPoolAmount,
             minEntriesRequired,
-            duration,
+            submissionDuration,  // NEW PARAMETER
+            contestDuration,     // UPDATED PARAMETER
             title,
             description,
             config.maxVoteAmount,
@@ -436,12 +459,13 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     }
 
     function _finalizeContestCreation(
-        address contestAddress,
-        uint256 totalPoolAmount,
-        uint256 netPoolAmount,
-        uint256 minEntriesRequired,
-        uint256 duration,
-        string calldata title
+    address contestAddress,
+    uint256 totalPoolAmount,
+    uint256 netPoolAmount,
+    uint256 minEntriesRequired,
+    uint256 submissionDuration,
+    uint256 contestDuration,
+    string calldata title
     ) private {
         uint256 platformFee = totalPoolAmount - netPoolAmount;
         
@@ -471,10 +495,61 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             netPoolAmount,
             platformFee,
             minEntriesRequired,
-            duration,
+            contestDuration,  // Using total duration for event
             title
         );
         
         emit PlatformFeeCollected(contestId, platformFee, msg.sender);
     }
+
+
+    /**
+    * @dev Calculate voting duration from parameters
+    * @param submissionDuration Duration for submissions
+    * @param contestDuration Total contest duration
+    * @return votingDuration Duration of voting phase
+    */
+    function calculateVotingDuration(
+        uint256 submissionDuration,
+        uint256 contestDuration
+    ) external pure returns (uint256 votingDuration) {
+        require(submissionDuration < contestDuration, "Invalid durations");
+        return contestDuration - submissionDuration;
+    }
+
+    /**
+    * @dev Validate durations before contest creation
+    * @param submissionDuration Duration for submissions
+    * @param contestDuration Total contest duration
+    * @return isValid Whether durations are valid
+    * @return reason Reason if invalid
+    */
+    function validateDurations(
+        uint256 submissionDuration,
+        uint256 contestDuration
+    ) external pure returns (bool isValid, string memory reason) {
+        if (submissionDuration < MIN_SUBMISSION_DURATION) {
+            return (false, "Submission duration too short");
+        }
+        if (submissionDuration > MAX_SUBMISSION_DURATION) {
+            return (false, "Submission duration too long");
+        }
+        if (contestDuration < MIN_CONTEST_DURATION) {
+            return (false, "Contest duration too short");
+        }
+        if (contestDuration > MAX_CONTEST_DURATION) {
+            return (false, "Contest duration too long");
+        }
+        if (submissionDuration >= contestDuration) {
+            return (false, "Submission must be shorter than total contest");
+        }
+        
+        uint256 votingDuration = contestDuration - submissionDuration;
+        if (votingDuration < 1 hours) {
+            return (false, "Voting phase too short (minimum 1 hour)");
+        }
+        
+        return (true, "Valid durations");
+    }
+
 }

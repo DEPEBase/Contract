@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./ContestInstance.sol";
+import "./ValidationLibrary.sol";
 
 /**
  * @title ContestFactory
@@ -13,16 +14,10 @@ import "./ContestInstance.sol";
  * @author DEPE Team
  */
 contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
-    using SafeERC20 for IERC20;
+       using SafeERC20 for IERC20;
 
     // ===== CONSTANTS =====
-    uint256 private constant MAX_CONTEST_DURATION = 30 days;
-    uint256 private constant MIN_CONTEST_DURATION = 1 hours;
-    uint256 private constant MIN_SUBMISSION_DURATION = 1 hours;
-    uint256 private constant MAX_SUBMISSION_DURATION = 6 days;
-    uint256 private constant MAX_STRING_LENGTH = 500;
-    uint256 private constant MAX_TITLE_LENGTH = 100;
-    uint256 private constant PLATFORM_FEE_BPS = 1000; // 10% platform fee
+    uint256 private constant PLATFORM_FEE_BPS = 1000; // 10%
     uint256 private constant BASIS_POINTS = 10000;
 
     // ===== STRUCTS =====
@@ -48,51 +43,26 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== STATE VARIABLES =====
     FactoryConfig public config;
     
-    // Contest tracking - optimized storage
     mapping(uint256 => ContestInfo) private _contests;
     mapping(address => uint256[]) private _userContests;
-    mapping(address => uint256) private _userContestCount;
-    
-    // Rate limiting
-    mapping(address => uint256) private _lastContestTime;
-    mapping(address => uint256) private _dailyContestCount;
-    mapping(address => uint256) private _dailyResetTime;
-    
-    // Contest validation
-    uint256 public minPoolDEPE = 1_000_000 * 1e18; // 1M DEPE minimum
 
     // ===== EVENTS =====
     event ContestCreated(
         uint256 indexed contestId,
         address indexed contestAddress,
         address indexed creator,
-        uint256 totalPoolAmount,
         uint256 netPoolAmount,
-        uint256 platformFee,
-        uint256 minEntriesRequired,
-        uint256 duration,
-        string title
+        uint256 platformFee
     );
     
-    event DEPEVoteAmoutUpdated(uint256 min, uint256 newPrice);
+    event DEPEVoteAmountUpdated(uint256 min, uint256 max);
     event MinPoolUpdated(uint256 oldMin, uint256 newMin);
     event ContestDeactivated(uint256 indexed contestId, address indexed creator);
     event PlatformWalletUpdated(address indexed oldWallet, address indexed newWallet);
     event PlatformFeeCollected(uint256 indexed contestId, uint256 amount, address indexed creator);
-    event durationLog(uint256 duration, uint256 minDuration,  uint256 maxDuration);
 
     // ===== ERRORS =====
-    error InvalidAddress();
-    error InvalidAmount();
-    error InvalidDuration();
-    error InvalidString();
-    error InvalidMinEntries();
-    error PoolBelowMinimum();
-    error RateLimitExceeded();
-    error CooldownNotMet();
     error ContestNotExists();
-    error SaltAlreadyUsed();
-    error TransferFailed();
     error UnauthorizedDeactivation();
 
     // ===== MODIFIERS =====
@@ -108,12 +78,13 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 maxVoteAmount,
         uint256 minVoteAmount
     ) Ownable(msg.sender) {
-        if (_depeToken == address(0) || _platformWallet == address(0)) revert InvalidAddress();
+        ContestValidation.validateAddresses(_depeToken, _platformWallet, msg.sender);
+        ContestValidation.validateVoteAmounts(maxVoteAmount, minVoteAmount);
         
         config = FactoryConfig({
             depeToken: _depeToken,
             platformWallet: _platformWallet,
-            minPoolDEPE: minPoolDEPE,
+            minPoolDEPE: 1_000_000 * 1e18,
             maxVoteAmount: maxVoteAmount,
             minVoteAmount: minVoteAmount,
             totalContests: 0,
@@ -124,69 +95,53 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     // ===== CONTEST CREATION =====
     
     /**
-    * @dev Create a new contest with dual duration support
-    * @param totalPoolAmount Total amount of DEPE (platform fee will be deducted)
-    * @param minEntriesRequired Minimum entries required for contest to be valid
-    * @param submissionDuration Duration for submission phase in seconds
-    * @param contestDuration Total contest duration (submission + voting) in seconds
-    * @param title Contest title
-    * @param description Contest description
-    * @return contestAddress Address of the created contest
-    */
+     * @dev Create a new contest - SIMPLIFIED with library
+     */
     function createContest(
-    uint256 totalPoolAmount,
-    uint256 minEntriesRequired,
-    uint256 submissionDuration,  // NEW PARAMETER
-    uint256 contestDuration,     // RENAMED from duration
-    string calldata title,
-    string calldata description
-) 
-    external 
-    nonReentrant 
-    whenNotPaused
-    returns (address contestAddress) 
-{
-    // Comprehensive parameter validation
-    _validateContestParameters(
-        totalPoolAmount,
-        submissionDuration,
-        contestDuration,
-        title,
-        description
-    );
-    
-    // Process fees and transfers
-    uint256 netPoolAmount = _processFees(totalPoolAmount);
-    
-    // Deploy contest with dual durations
-    contestAddress = _deployContest(
-        netPoolAmount,
-        minEntriesRequired,
-        submissionDuration,
-        contestDuration,
-        title,
-        description
-    );
-    
-    // Store contest and emit events
-    _finalizeContestCreation(
-        contestAddress,
-        totalPoolAmount,
-        netPoolAmount,
-        minEntriesRequired,
-        contestDuration,
-        title
-    );
-    
-    return contestAddress;
-}
+        uint256 totalPoolAmount,
+        uint256 minEntriesRequired,
+        uint256 submissionDuration,
+        uint256 contestDuration,
+        string calldata title,
+        string calldata description
+    ) 
+        external 
+        nonReentrant 
+        whenNotPaused
+        returns (address contestAddress) 
+    {
+        (uint256 platformFee, uint256 netPoolAmount) = ContestValidation.validatePoolAmount(
+            totalPoolAmount,
+            config.minPoolDEPE
+        );
+
+        
+        // Process fees
+        IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), totalPoolAmount);
+        
+        if (platformFee > 0) {
+            IERC20(config.depeToken).safeTransfer(config.platformWallet, platformFee);
+            config.totalFeesCollected += platformFee;
+        }
+        
+        // Deploy contest
+        contestAddress = _deployContest(
+            netPoolAmount,
+            minEntriesRequired,
+            submissionDuration,
+            contestDuration,
+            title,
+            description
+        );
+        
+        // Store and finalize
+        _finalizeContestCreation(contestAddress, netPoolAmount, platformFee, title);
+        
+        return contestAddress;
+    }
 
     // ===== CONTEST MANAGEMENT =====
     
-    /**
-     * @dev Deactivate a contest (creator only)
-     * @param contestId Contest ID to deactivate
-     */
     function deactivateContest(uint256 contestId) 
         external 
         validContestId(contestId) 
@@ -195,7 +150,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         ContestInfo storage contestInfo = _contests[contestId];
         
         if (contestInfo.creator != msg.sender) revert UnauthorizedDeactivation();
-        if (!contestInfo.active) return; // Already deactivated
+        if (!contestInfo.active) return;
         
         contestInfo.active = false;
         emit ContestDeactivated(contestId, msg.sender);
@@ -203,68 +158,41 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
 
     // ===== VIEW FUNCTIONS =====
     
-    /**
-     * @dev Get contest information by ID
-     * @param contestId Contest ID
-     * @return contestInfo Contest information struct
-     */
     function getContest(uint256 contestId) 
         external 
         view 
         validContestId(contestId) 
-        returns (ContestInfo memory contestInfo) 
+        returns (ContestInfo memory) 
     {
         return _contests[contestId];
     }
 
-    /**
-     * @dev Get contest address by ID
-     * @param contestId Contest ID
-     * @return contestAddress Contest contract address
-     */
     function getContestAddress(uint256 contestId) 
         external 
         view 
         validContestId(contestId) 
-        returns (address contestAddress) 
+        returns (address) 
     {
         return _contests[contestId].contestAddress;
     }
 
-    /**
-     * @dev Get user's contest IDs
-     * @param user User address
-     * @return contestIds Array of contest IDs created by user
-     */
-    function getUserContests(address user) external view returns (uint256[] memory contestIds) {
+    function getUserContests(address user) external view returns (uint256[] memory) {
         return _userContests[user];
     }
 
-    /**
-     * @dev Get user's contest count
-     * @param user User address
-     * @return count Number of contests created by user
-     */
-    function getUserContestCount(address user) external view returns (uint256 count) {
-        return _userContestCount[user];
+    function getUserContestCount(address user) external view returns (uint256) {
+        return _userContests[user].length;  // ✅ Calculate instead of storing
     }
 
-    /**
-     * @dev Get active contests in a range
-     * @param startId Starting contest ID
-     * @param endId Ending contest ID (exclusive)
-     * @return activeContests Array of active contest information
-     */
     function getActiveContests(uint256 startId, uint256 endId) 
         external 
         view 
-        returns (ContestInfo[] memory activeContests) 
+        returns (ContestInfo[] memory) 
     {
         if (endId > config.totalContests) {
             endId = config.totalContests;
         }
         
-        // Count active contests first
         uint256 activeCount = 0;
         for (uint256 i = startId; i < endId; ) {
             if (_contests[i].active) {
@@ -273,8 +201,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             unchecked { ++i; }
         }
         
-        // Populate array
-        activeContests = new ContestInfo[](activeCount);
+        ContestInfo[] memory activeContests = new ContestInfo[](activeCount);
         uint256 index = 0;
         
         for (uint256 i = startId; i < endId && index < activeCount; ) {
@@ -288,153 +215,54 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         return activeContests;
     }
 
-    /**
-     * @dev Get factory configuration
-     * @return factoryConfig Current factory configuration
-     */
-    function getFactoryConfig() external view returns (FactoryConfig memory factoryConfig) {
+    function getFactoryConfig() external view returns (FactoryConfig memory) {
         return config;
+    }
+
+    function getTotalFeesCollected() external view returns (uint256) {
+        return config.totalFeesCollected;
     }
 
     // ===== ADMIN FUNCTIONS =====
     
-    /**
-     * @dev Update platform wallet (only owner)
-     * @param newPlatformWallet New platform wallet address
-     */
     function updatePlatformWallet(address newPlatformWallet) external onlyOwner {
-        if (newPlatformWallet == address(0)) revert InvalidAddress();
+        ContestValidation.validateAddresses(config.depeToken, msg.sender, newPlatformWallet);
         address oldWallet = config.platformWallet;
         config.platformWallet = newPlatformWallet;
         emit PlatformWalletUpdated(oldWallet, newPlatformWallet);
     }
 
-    /**
-     * @dev Update DEPE vote amount (only owner)
-     * @param _maxVote & _minVote DEPE amount in (18 decimals)
-     */
-    function updateDEPEPrice(uint256 _maxVote, uint256 _minVote) external onlyOwner {
-        if (_maxVote == 0) revert InvalidAmount();
-        if (_minVote == 0) revert InvalidAmount();
-        if (_maxVote < _minVote) revert InvalidAmount();
-        
+    function updateVoteAmout(uint256 _maxVote, uint256 _minVote) external onlyOwner {
+        ContestValidation.validateVoteAmounts(_maxVote, _minVote);
         config.maxVoteAmount = _maxVote;
         config.minVoteAmount = _minVote;
-        emit DEPEVoteAmoutUpdated(_minVote, _maxVote);
+        emit DEPEVoteAmountUpdated(_minVote, _maxVote);
     }
 
-    /**
-     * @dev Update minimum pool amount in DEPE (only owner)
-     * @param newMinPool New minimum pool amount in DEPE tokens
-     */
     function updateMinPoolDEPE(uint256 newMinPool) external onlyOwner {
-        if (newMinPool == 0) revert InvalidAmount();
+        if (newMinPool == 0) revert ContestValidation.InvalidAmount();
         uint256 oldMin = config.minPoolDEPE;
         config.minPoolDEPE = newMinPool;
         emit MinPoolUpdated(oldMin, newMinPool);
     }
 
-    /**
-     * @dev Pause factory (only owner)
-     */
     function pause() external onlyOwner {
         _pause();
     }
 
-    /**
-     * @dev Unpause factory (only owner)
-     */
     function unpause() external onlyOwner {
         _unpause();
     }
 
-    /**
-     * @dev Calculate platform fee for a given pool amount
-     * @param totalAmount Total pool amount in DEPE
-     * @return platformFee Platform fee in DEPE
-     * @return netAmount Net amount after fee deduction
-     */
-    function calculateFees(uint256 totalAmount) 
-        external 
-        pure 
-        returns (uint256 platformFee, uint256 netAmount) 
-    {
-        platformFee = (totalAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
-        netAmount = totalAmount - platformFee;
-        return (platformFee, netAmount);
-    }
-
-    /**
-     * @dev Get total fees collected by the platform
-     * @return totalFees Total platform fees collected
-     */
-    function getTotalFeesCollected() external view returns (uint256 totalFees) {
-        return config.totalFeesCollected;
-    }
-
     // ===== INTERNAL FUNCTIONS =====
     
-    function _validateContestParameters(
-    uint256 totalPoolAmount,
-    uint256 submissionDuration,
-    uint256 contestDuration,
-    string calldata title,
-    string calldata description
-) private view {
-    // Amount validation
-    if (totalPoolAmount < config.minPoolDEPE) revert PoolBelowMinimum();
-    
-    // Ensure net amount after fee is still meaningful
-    uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
-    uint256 netAmount = totalPoolAmount - platformFee;
-    if (netAmount < (config.minPoolDEPE * 90) / 100) revert PoolBelowMinimum();
-    
-    // Duration validation - NEW LOGIC
-    if (submissionDuration < MIN_SUBMISSION_DURATION) revert InvalidDuration();
-    if (submissionDuration > MAX_SUBMISSION_DURATION) revert InvalidDuration();
-    if (contestDuration < MIN_CONTEST_DURATION) revert InvalidDuration();
-    if (contestDuration > MAX_CONTEST_DURATION) revert InvalidDuration();
-    
-    // CRITICAL: Submission duration must be less than total contest duration
-    if (submissionDuration >= contestDuration) revert InvalidDuration();
-    
-    // Ensure voting phase has reasonable duration (at least 1 hour)
-    uint256 votingDuration = contestDuration - submissionDuration;
-    if (votingDuration < 1 hours) revert InvalidDuration();
-    
-    // String validation
-    if (bytes(title).length == 0 || bytes(title).length > MAX_TITLE_LENGTH) {
-        revert InvalidString();
-    }
-    if (bytes(description).length > MAX_STRING_LENGTH) {
-        revert InvalidString();
-    }
-}
-
-    function _processFees(uint256 totalPoolAmount) private returns (uint256 netPoolAmount) {
-        // Calculate platform fee and net pool amount
-        uint256 platformFee = (totalPoolAmount * PLATFORM_FEE_BPS) / BASIS_POINTS;
-        netPoolAmount = totalPoolAmount - platformFee;
-        
-        // Transfer total amount from user first
-        IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), totalPoolAmount);
-        
-        // Send platform fee to platform wallet
-        if (platformFee > 0) {
-            IERC20(config.depeToken).safeTransfer(config.platformWallet, platformFee);
-            config.totalFeesCollected += platformFee;
-        }
-        
-        return netPoolAmount;
-    }
-
     function _deployContest(
-    uint256 netPoolAmount,
-    uint256 minEntriesRequired,
-    uint256 submissionDuration,
-    uint256 contestDuration,
-    string calldata title,
-    string calldata description
+        uint256 netPoolAmount,
+        uint256 minEntriesRequired,
+        uint256 submissionDuration,
+        uint256 contestDuration,
+        string calldata title,
+        string calldata description
     ) private returns (address) {
         ContestInstance contestInstance = new ContestInstance(
             config.depeToken,
@@ -442,33 +270,28 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             config.platformWallet,
             netPoolAmount,
             minEntriesRequired,
-            submissionDuration,  // NEW PARAMETER
-            contestDuration,     // UPDATED PARAMETER
+            submissionDuration,
+            contestDuration,
             title,
             description,
             config.maxVoteAmount,
             config.minVoteAmount
         );
-        address contestAddress = address(contestInstance);
         
-        // Transfer net pool amount to the contest contract
+        address contestAddress = address(contestInstance);
         IERC20(config.depeToken).safeTransfer(contestAddress, netPoolAmount);
         
         return contestAddress;
     }
 
     function _finalizeContestCreation(
-    address contestAddress,
-    uint256 totalPoolAmount,
-    uint256 netPoolAmount,
-    uint256 minEntriesRequired,
-    uint256 contestDuration,
-    string calldata title
+        address contestAddress,
+        uint256 netPoolAmount,
+        uint256 platformFee,
+        string calldata title
     ) private {
-        uint256 platformFee = totalPoolAmount - netPoolAmount;
-        
-        // Store contest information
         uint256 contestId = config.totalContests;
+        
         _contests[contestId] = ContestInfo({
             contestAddress: contestAddress,
             creator: msg.sender,
@@ -478,26 +301,17 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             active: true
         });
         
-        // Update mappings
         _userContests[msg.sender].push(contestId);
-        unchecked { 
-            ++_userContestCount[msg.sender];
-            ++config.totalContests;
-        }
+        unchecked { ++config.totalContests; }
 
         emit ContestCreated(
             contestId,
             contestAddress,
             msg.sender,
-            totalPoolAmount,
             netPoolAmount,
-            platformFee,
-            minEntriesRequired,
-            contestDuration,  // Using total duration for event
-            title
+            platformFee
         );
         
         emit PlatformFeeCollected(contestId, platformFee, msg.sender);
     }
-
 }

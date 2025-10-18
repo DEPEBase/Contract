@@ -174,7 +174,6 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         totalPoolAmount,
         netPoolAmount,
         minEntriesRequired,
-        submissionDuration,
         contestDuration,
         title
     );
@@ -463,7 +462,6 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
     uint256 totalPoolAmount,
     uint256 netPoolAmount,
     uint256 minEntriesRequired,
-    uint256 submissionDuration,
     uint256 contestDuration,
     string calldata title
     ) private {
@@ -500,56 +498,6 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         );
         
         emit PlatformFeeCollected(contestId, platformFee, msg.sender);
-    }
-
-
-    /**
-    * @dev Calculate voting duration from parameters
-    * @param submissionDuration Duration for submissions
-    * @param contestDuration Total contest duration
-    * @return votingDuration Duration of voting phase
-    */
-    function calculateVotingDuration(
-        uint256 submissionDuration,
-        uint256 contestDuration
-    ) external pure returns (uint256 votingDuration) {
-        require(submissionDuration < contestDuration, "Invalid durations");
-        return contestDuration - submissionDuration;
-    }
-
-    /**
-    * @dev Validate durations before contest creation
-    * @param submissionDuration Duration for submissions
-    * @param contestDuration Total contest duration
-    * @return isValid Whether durations are valid
-    * @return reason Reason if invalid
-    */
-    function validateDurations(
-        uint256 submissionDuration,
-        uint256 contestDuration
-    ) external pure returns (bool isValid, string memory reason) {
-        if (submissionDuration < MIN_SUBMISSION_DURATION) {
-            return (false, "Submission duration too short");
-        }
-        if (submissionDuration > MAX_SUBMISSION_DURATION) {
-            return (false, "Submission duration too long");
-        }
-        if (contestDuration < MIN_CONTEST_DURATION) {
-            return (false, "Contest duration too short");
-        }
-        if (contestDuration > MAX_CONTEST_DURATION) {
-            return (false, "Contest duration too long");
-        }
-        if (submissionDuration >= contestDuration) {
-            return (false, "Submission must be shorter than total contest");
-        }
-        
-        uint256 votingDuration = contestDuration - submissionDuration;
-        if (votingDuration < 1 hours) {
-            return (false, "Voting phase too short (minimum 1 hour)");
-        }
-        
-        return (true, "Valid durations");
     }
 
 }

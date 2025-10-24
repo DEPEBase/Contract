@@ -1100,9 +1100,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
                     _pendingRefunds[voter] += voteAmount;
                 }
                 unchecked { ++j; }
-            }
+                }
             
-            unchecked { ++i; }
+                unchecked { ++i; }
         }
     }
 }

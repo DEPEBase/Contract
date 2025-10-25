@@ -6,6 +6,15 @@
 
 The DEPE smart contract system implements a complete decentralized meme contest platform built on Base. The platform enables users to create contests, submit memes, vote with DEPE tokens, and stake on submissions with automatic reward distribution. The contracts are designed for security, gas efficiency, and fair reward distribution.
 
+## Live Application
+
+**Experience DEPE Contest Arena:**
+
+- **Farcaster Mini App**: [https://farcaster.xyz/miniapps/3UkXwOASV_BU/depe](https://farcaster.xyz/miniapps/3UkXwOASV_BU/depe)
+- **Base App**: Search "DEPE" in the Base app
+- **Live on Base Mainnet**: Fully functional with real $DEPE token integration
+- **Alpha Test Version**: Create, participate, and win in live meme contests
+
 ## Architecture
 
 ### Core Contracts
@@ -31,11 +40,6 @@ ContestInstance (per contest)
 - **DEPE Token**: `0x37e0f2d2340968981ed82d47c0112b1619dc5b07`
 - **ContestFactory**: `0xFC295B363b93806eCc01697B3DD504355164E4f6`
 
-**Base Testnet:**
-- **DEPE Token**: `0x37e0f2d2340968981ed82d47c0112b1619dc5b07`
-- **ContestFactory**: `[TO_BE_DEPLOYED]` - Deploy using:
-  - Hardhat: `npx hardhat run scripts/deploy-testnet.js --network baseTestnet`
-  - Remix: Follow Option 2 steps above, switch wallet to Base Testnet
 
 ## Security Features
 
@@ -208,27 +212,24 @@ npx hardhat verify --network base <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
 #### Option 2: Remix IDE Verification
 
 1. **Visit BaseScan**
-   - Go to [BaseScan](https://basescan.org/)
-   - Search for your deployed contract address
+   - Go to [Remix](https://remix.ethereum.org/)
+   - Uplaod your contract files in the files explorer `ContestFactory.sol`, `ContestInstance.sol`, and `ValidationLibrary.sol`
 
-2. **Access Contract Tab**
-   - Click on the "Contract" tab
-   - Click "Verify and Publish"
+2. **Access Verification Contract Tab**
+   - Click on the "Contract Verification icon" tab - bottom-left sidebar
+   - Fill in the required details
 
 3. **Select Verification Method**
-   - Choose "Via Standard JSON Input"
-   - Upload your contract source files
-
-4. **Upload Contract Files**
-   - Upload `ContestFactory.sol`, `ContestInstance.sol`, and `ValidationLibrary.sol`
+   - Choose "Ethscan and Blockscout" and 
+   - Make sure you have your Ethscan API
    - Ensure OpenZeppelin contracts are available
 
-5. **Set Compiler Settings**
+4. **Set Compiler Settings**
    - Compiler Version: `0.8.26`
    - Optimization: Enabled (200 runs)
    - EVM Version: Default
 
-6. **Enter Constructor Arguments**
+5. **Enter Constructor Arguments**
    - ContestFactory: `["0x37e0f2d2340968981ed82d47c0112b1619dc5b07", "your_platform_wallet_address", "10000000000000000000000000", "10000000000000000000"]`
    - ContestInstance: Constructor arguments from deployment
 
@@ -237,12 +238,6 @@ npx hardhat verify --network base <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
    - Wait for verification to complete
 
 ## Contract Interface
-
-### DEPE Token Functions
-- `transfer(address to, uint256 amount)` - Transfer with fee logic
-- `approve(address spender, uint256 amount)` - Approve spending allowance
-- `balanceOf(address account)` - Check token balance
-- `allowance(address owner, address spender)` - Check spending allowance
 
 ### ContestFactory Functions
 - `createContest(uint256 totalPoolAmount, uint256 minEntriesRequired, uint256 submissionDuration, uint256 contestDuration, string calldata title, string calldata description)` - Create new contest
@@ -306,7 +301,7 @@ npx hardhat run scripts/deploy.js --network localhost
 ```
 
 ### Testnet Testing Process
-1. Acquire testnet ETH from Base faucet
+1. Acquire testnet Base ETH from [Base faucet](https://docs.base.org/base-chain/tools/network-faucets/)
 2. Deploy contracts to Base testnet
 3. Execute comprehensive functionality tests
 4. Verify contracts on Basescan explorer
@@ -336,13 +331,13 @@ This project is licensed under the MIT License. See the LICENSE file for complet
 
 ## Contributing
 
-We welcome contributions to improve the DEPE platform. Please review our contribution guidelines and submit pull requests for any enhancements.
+We welcome contributions to improve the DEPE platform. Please get in touch.
 
 ## Support and Community
 
 For technical support, feature requests, or community discussions:
 - Create issues on our GitHub repository
-- Join our Discord community
+- Join our [Telgram community](https://t.me/DegenDEPE)
 - Contact: @dracklyn on Farcaster, BaseApp, Telegram, and X
 
 ---

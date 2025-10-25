@@ -344,4 +344,4 @@ For technical support, feature requests, or community discussions:
 
 **Built by the DEPE Team**
 
-*Make every meme.*
+*Make every meme liquid.*

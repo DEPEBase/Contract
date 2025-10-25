@@ -85,8 +85,8 @@ ContestInstance (per contest)
 - Submission phase ends early if sufficient entries
 
 ### Phase 2: Voting Phase  
-- Users vote with $DEPE tokens (minimum $1 USD equivalent)
-- Maximum vote limit of $10 USD equivalent per vote
+- Users vote with $DEPE tokens (minimum 10 $DEPE)
+- Maximum vote limit of 10,000,000 per vote
 - Vote amounts contribute to staking pool
 - Duration: Remaining time until contest deadline (minimum 1 hour)
 
@@ -100,7 +100,7 @@ ContestInstance (per contest)
 ## Technical Specifications
 
 ### Contest Parameters
-- **Minimum Pool**: 1,000,000 $DEPE (~$50 USD equivalent)
+- **Minimum Pool**: 1,000,000 $DEPE (~$1 USD equivalent)
 - **Minimum Entries**: User-configurable (1-1000 entries)
 - **Duration**: 1 hour to 30 days total contest length
 - **Submission Duration**: 1 hour to 7 days

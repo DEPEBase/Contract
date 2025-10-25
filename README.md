@@ -211,7 +211,7 @@ npx hardhat verify --network base <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
 
 #### Option 2: Remix IDE Verification
 
-1. **Visit BaseScan**
+1. **Visit Remix**
    - Go to [Remix](https://remix.ethereum.org/)
    - Uplaod your contract files in the files explorer `ContestFactory.sol`, `ContestInstance.sol`, and `ValidationLibrary.sol`
 

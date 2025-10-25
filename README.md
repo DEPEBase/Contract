@@ -183,6 +183,8 @@ npx hardhat run scripts/deploy.js --network base
 5. **Verify Contracts**
    - Use BaseScan to verify your deployed contracts
    - Contract source code will be available for public verification
+   
+
 
 ## Testing and Verification
 
@@ -197,9 +199,42 @@ npm run coverage
 ```
 
 ### Contract Verification
+
+#### Option 1: Hardhat CLI Verification
 ```bash
 npx hardhat verify --network base <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
 ```
+
+#### Option 2: Remix IDE Verification
+
+1. **Visit BaseScan**
+   - Go to [BaseScan](https://basescan.org/)
+   - Search for your deployed contract address
+
+2. **Access Contract Tab**
+   - Click on the "Contract" tab
+   - Click "Verify and Publish"
+
+3. **Select Verification Method**
+   - Choose "Via Standard JSON Input"
+   - Upload your contract source files
+
+4. **Upload Contract Files**
+   - Upload `ContestFactory.sol`, `ContestInstance.sol`, and `ValidationLibrary.sol`
+   - Ensure OpenZeppelin contracts are available
+
+5. **Set Compiler Settings**
+   - Compiler Version: `0.8.26`
+   - Optimization: Enabled (200 runs)
+   - EVM Version: Default
+
+6. **Enter Constructor Arguments**
+   - ContestFactory: `["0x37e0f2d2340968981ed82d47c0112b1619dc5b07", "your_platform_wallet_address", "10000000000000000000000000", "10000000000000000000"]`
+   - ContestInstance: Constructor arguments from deployment
+
+7. **Submit for Verification**
+   - Click "Verify and Publish"
+   - Wait for verification to complete
 
 ## Contract Interface
 
@@ -308,10 +343,10 @@ We welcome contributions to improve the DEPE platform. Please review our contrib
 For technical support, feature requests, or community discussions:
 - Create issues on our GitHub repository
 - Join our Discord community
-- Contact us at support@depe.com
+- Contact: @dracklyn on Farcaster, BaseApp, Telegram, and X
 
 ---
 
 **Built by the DEPE Team**
 
-*Creating secure, fair, and engaging meme contest experiences on Base network.*
+*Make every meme.*

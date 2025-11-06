@@ -13,7 +13,7 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
  * @title ContestInstance
  * @dev Contest contract with dual duration and automatic phase transitions
  * @author DEPE Team
- * @notice Refactored with submission and contest deadlines for automatic phase management
+ * @notice Refactored with FID-based voter registration and multi-submission staking
  */
 contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     using ECDSA for bytes32;
@@ -100,7 +100,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     
     mapping(uint256 => address[]) private _submissionVoters;
     mapping(uint256 => mapping(address => uint256)) private _submissionVotes;
-    mapping(address => bool) private _hasVoted;
+    mapping(uint256 => bool) private _hasVotedByFid;  // ✅ CHANGED: Track voting by FID instead of address
     
     mapping(uint256 => mapping(uint256 => uint256)) private _submissionStakes;
     mapping(uint256 => mapping(uint256 => bool)) private _stakesClaimed;
@@ -126,7 +126,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     
     event ContestCreated(address indexed creator, uint256 memePoolAmount, uint256 minEntriesRequired);
     event SubmissionAdded(uint256 indexed submissionFid, address indexed submitter, uint256 fid);
-    event VoteCast(uint256 indexed submissionFid, address indexed voter, uint256 amount);
+    event VoteCast(uint256 indexed submissionFid, address indexed voter, uint256 fid, uint256 amount);
     event StakePlaced(uint256 indexed submissionFid, uint256 indexed fid, uint256 amount);
     event PhaseChanged(ContestPhase oldPhase, ContestPhase newPhase);
     event WinnerDetermined(uint256 indexed submissionFid, uint256 totalVotes);
@@ -333,23 +333,29 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         _allSubmissionFids.push(fid);
 
         emit SubmissionAdded(fid, msg.sender, fid);
-        
-        // No auto-transition - handled by timestamps
     }
 
     // =============================================================
     //                       VOTING FUNCTIONS
     // =============================================================
     
+    /**
+     * @dev Vote on a submission - now enforces one vote per FID
+     * @param submissionFid The submission to vote on
+     * @param voteAmount Amount of tokens to vote with
+     * @param fid The voter's Farcaster ID
+     * @param platformSignature Platform signature for validation
+     */
     function vote(
         uint256 submissionFid,
         uint256 voteAmount,
         uint256 fid,
         bytes calldata platformSignature
     ) external onlyDuringVoting validSubmission(submissionFid) nonReentrant whenNotPaused {
-        if (_hasVoted[msg.sender]) revert AlreadyVoted();
-        if (_submissionVotes[submissionFid][msg.sender] > 0) revert AlreadyVoted();
         if (fid == 0) revert InvalidFID();
+        
+        // ✅ CHANGED: Check if this FID has already voted (moved from stake function)
+        if (_hasVotedByFid[fid]) revert AlreadyVoted();
         
         if (voteAmount < config.minVoteAmount || voteAmount > config.maxVoteAmount) {
             revert VoteAmountInvalid();
@@ -364,11 +370,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
         _submissionVotes[submissionFid][msg.sender] = voteAmount;
         
-        // ✅ OPTIMIZED: Track voter globally on first vote
-        if (!_hasVoted[msg.sender]) {
-            _hasVoted[msg.sender] = true;
-            _allVoters.push(msg.sender);
-        }
+        // ✅ CHANGED: Mark this FID as having voted
+        _hasVotedByFid[fid] = true;
+        _allVoters.push(msg.sender);
         
         state.totalStakingPool += voteAmount;
         _submissionVoters[submissionFid].push(msg.sender);
@@ -376,7 +380,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         unchecked { ++_submissions[submissionFid].voteCount; }
         _submissions[submissionFid].totalVoteAmount += voteAmount;
 
-        emit VoteCast(submissionFid, msg.sender, voteAmount);
+        emit VoteCast(submissionFid, msg.sender, fid, voteAmount);
     }
 
 
@@ -384,6 +388,13 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                       STAKING FUNCTIONS
     // =============================================================
     
+    /**
+     * @dev Stake on a submission - allows unlimited stakes on any submissions
+     * @param submissionFid The submission to stake on
+     * @param stakeAmount Amount of tokens to stake
+     * @param fid The staker's Farcaster ID
+     * @param platformSignature Platform signature for validation
+     */
     function stake(
         uint256 submissionFid,
         uint256 stakeAmount,
@@ -393,8 +404,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         if (stakeAmount == 0) revert InvalidAmount();
         if (fid == 0) revert InvalidFID();
         
-        if (_submissionStakes[submissionFid][fid] > 0) revert AlreadyStaked();
-
+        // Users can stake multiple times on the same submission or across different submissions
+        
+        // ✅ ENFORCE: Total stake across ALL submissions and all calls must not exceed 25% of meme pool
         uint256 currentTotalStake = _totalStakesByFid[fid];
         uint256 newTotalStake = currentTotalStake + stakeAmount;
         
@@ -410,11 +422,17 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
         IERC20(config.depeToken).safeTransferFrom(msg.sender, address(this), stakeAmount);
 
-        _submissionStakes[submissionFid][fid] = stakeAmount;
-        _fidToAddress[submissionFid][fid] = msg.sender;
-        _submissionStakerFids[submissionFid].push(fid);
+        // ✅ CHANGED: Accumulate stakes instead of replacing
+        uint256 previousStake = _submissionStakes[submissionFid][fid];
+        _submissionStakes[submissionFid][fid] += stakeAmount;
+        
+        // Only add to staker list if this is first stake on this submission
+        if (previousStake == 0) {
+            _fidToAddress[submissionFid][fid] = msg.sender;
+            _submissionStakerFids[submissionFid].push(fid);
+        }
 
-        // ✅ OPTIMIZED: Track staker globally on first stake
+        // ✅ Track staker globally on first stake ever
         if (!_isStaker[msg.sender]) {
             _isStaker[msg.sender] = true;
             _allStakerAddresses.push(msg.sender);
@@ -482,7 +500,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
         uint256 len = _allSubmissionFids.length;
         
-        // ✅ OPTIMIZED: Cache array length
         for (uint256 i = 0; i < len; ) {
             uint256 fid = _allSubmissionFids[i];
             Submission storage s = _submissions[fid];
@@ -538,7 +555,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         emit PhaseChanged(oldPhase, ContestPhase.ENDED);
 
         address winnerAddr = _submissions[winnerFid].submitter;
-        if (msg.sender != winnerAddr) revert NotAuthorized();
 
         IERC20(config.depeToken).safeTransfer(winnerAddr, config.memePoolAmount);
 
@@ -672,6 +688,20 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
      */
     function getStakerCount() external view returns (uint256) {
         return _allStakerFids.length;
+    }
+
+    /**
+     * @dev Check if a FID has voted
+     */
+    function hasVoted(uint256 fid) external view returns (bool) {
+        return _hasVotedByFid[fid];
+    }
+
+    /**
+     * @dev Check if a FID has staked on a specific submission
+     */
+    function hasStakedOnSubmission(uint256 submissionFid, uint256 fid) external view returns (bool) {
+        return _submissionStakes[submissionFid][fid] > 0;
     }
 
     function getUserVoteAmount(address user, uint256 submissionFid) external view returns (uint256) {
@@ -1100,9 +1130,9 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
                     _pendingRefunds[voter] += voteAmount;
                 }
                 unchecked { ++j; }
-                }
+            }
             
-                unchecked { ++i; }
+            unchecked { ++i; }
         }
     }
 }

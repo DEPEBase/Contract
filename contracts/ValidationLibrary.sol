@@ -101,6 +101,13 @@ library ContestValidation {
         if (minVoteAmount > maxVoteAmount) revert InvalidAmount();
     }
 
+    /**
+     * @dev Validate vote amounts
+     */
+    function validateFid(uint256 fid) internal pure {
+        if (fid == 0) revert InvalidAmount();
+    }
+
 
     /**
      * @dev Calculate voting duration

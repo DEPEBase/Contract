@@ -54,6 +54,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     struct ContestConfig {
         address depeToken;
         address creator;
+        uint256 creatorFid;
         address platformWallet;
         uint256 memePoolAmount;
         uint256 maxVoteAmount;
@@ -61,6 +62,21 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         uint256 minEntriesRequired;
         uint256 submissionDeadline;  // When submissions end
         uint256 contestDeadline;     // When voting/staking ends
+    }
+
+    struct ConstructorParams {
+        address depeToken;
+        address creator;
+        uint256 creatorFid;
+        address platformWallet;
+        uint256 memePoolAmount;
+        uint256 minEntriesRequired;
+        uint256 submissionDuration;
+        uint256 contestDuration;
+        string title;
+        string description;
+        uint256 maxVoteAmount;
+        uint256 minVoteAmount;
     }
 
     struct ContestState {
@@ -92,6 +108,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     
     ContestConfig public config;
     ContestState public state;
+    bool private _memePoolRefundAvailable;
     
     mapping(uint256 => Submission) private _submissions;
     mapping(address => bool) private _hasSubmitted;
@@ -116,7 +133,6 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     mapping(address => bool) private _isStaker;      // Quick staker check
     mapping(uint256 => bool) private _fidHasStaked;  // Quick FID stake check
     
-    // ✅ NEW: Pull-based refund system
     mapping(address => uint256) private _pendingRefunds;
     bool private _refundMode;
 
@@ -137,6 +153,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     event AllStakesRefunded(uint256 totalRefunded, string reason);
     event RefundClaimed(address indexed user, uint256 amount);
     event RefundModeActivated(string reason);
+    event MemePoolRefundClaimed(address indexed claimer, uint256 indexed creatorFid, uint256 amount);
 
     // =============================================================
     //                           ERRORS
@@ -194,47 +211,36 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     //                        CONSTRUCTOR
     // =============================================================
     
-    constructor(
-        address _depeToken,
-        address _creator,
-        address _platformWallet,
-        uint256 _memePoolAmount,
-        uint256 _minEntriesRequired,
-        uint256 _submissionDuration,
-        uint256 _contestDuration,
-        string memory _title,
-        string memory _description,
-        uint256 _maxVoteAmount,
-        uint256 _minVoteAmount
-    ) Ownable(_creator) {
-        if (_depeToken == address(0) || _creator == address(0) || _platformWallet == address(0)) {
+    constructor(ConstructorParams memory params) Ownable(params.creator) {
+        if (params.depeToken == address(0) || params.creator == address(0) || params.platformWallet == address(0)) {
             revert InvalidAddress();
         }
-        if (_memePoolAmount == 0 || _minEntriesRequired < 2) revert InvalidAmount();
+        if (params.memePoolAmount == 0 || params.minEntriesRequired < 2) revert InvalidAmount();
         
         // Validate both durations
-        if (_submissionDuration < 1 hours) revert InvalidDuration();
-        if (_contestDuration < 1 hours || _contestDuration > 30 days) revert InvalidDuration();
-        if (_submissionDuration >= _contestDuration) revert InvalidDuration();
+        if (params.submissionDuration < 1 hours) revert InvalidDuration();
+        if (params.contestDuration < 1 hours || params.contestDuration > 30 days) revert InvalidDuration();
+        if (params.submissionDuration >= params.contestDuration) revert InvalidDuration();
         
-        if (bytes(_title).length == 0 || bytes(_title).length > MAX_STRING_LENGTH) revert InvalidString();
-        if (_maxVoteAmount == 0 || _minVoteAmount == 0 || _minVoteAmount > _maxVoteAmount) revert InvalidAmount();
+        if (bytes(params.title).length == 0 || bytes(params.title).length > MAX_STRING_LENGTH) revert InvalidString();
+        if (params.maxVoteAmount == 0 || params.minVoteAmount == 0 || params.minVoteAmount > params.maxVoteAmount) revert InvalidAmount();
 
         config = ContestConfig({
-            depeToken: _depeToken,
-            creator: _creator,
-            platformWallet: _platformWallet,
-            memePoolAmount: _memePoolAmount,
-            maxVoteAmount: _maxVoteAmount,
-            minVoteAmount: _minVoteAmount,
-            minEntriesRequired: _minEntriesRequired,
-            submissionDeadline: block.timestamp + _submissionDuration,
-            contestDeadline: block.timestamp + _contestDuration
+            depeToken: params.depeToken,
+            creator: params.creator,
+            creatorFid: params.creatorFid,
+            platformWallet: params.platformWallet,
+            memePoolAmount: params.memePoolAmount,
+            maxVoteAmount: params.maxVoteAmount,
+            minVoteAmount: params.minVoteAmount,
+            minEntriesRequired: params.minEntriesRequired,
+            submissionDeadline: block.timestamp + params.submissionDuration,
+            contestDeadline: block.timestamp + params.contestDuration
         });
 
         state = ContestState({
-            title: _title,
-            description: _description,
+            title: params.title,
+            description: params.description,
             phase: ContestPhase.SUBMISSION,
             submissionCount: 0,
             totalStakingPool: 0,
@@ -243,7 +249,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
             creatorRewardClaimed: false
         });
 
-        emit ContestCreated(_creator, _memePoolAmount, _minEntriesRequired);
+        emit ContestCreated(params.creator, params.memePoolAmount, params.minEntriesRequired);
     }
 
     // =============================================================
@@ -614,6 +620,36 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         emit RefundClaimed(msg.sender, amount);
     }
 
+    /**
+     * ✅ NEW: Creator claims meme pool refund using their FID (pull pattern)
+     * @param fid The creator's Farcaster ID
+     * @param platformSignature Platform signature for validation
+     */
+    function claimMemePoolRefund(
+        uint256 fid,
+        bytes calldata platformSignature
+    ) external nonReentrant {
+        if (!_memePoolRefundAvailable) revert NoRefundAvailable();
+        if (fid != config.creatorFid) revert NotAuthorized();
+        
+        // Validate that the caller owns this FID
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            address(this),
+            msg.sender,
+            fid
+        ));
+        
+        _validateSignature(messageHash, platformSignature);
+        
+        _memePoolRefundAvailable = false;
+        
+        uint256 amount = config.memePoolAmount;
+        // ✅ Send to msg.sender (current wallet - smart wallet or EOA)
+        IERC20(config.depeToken).safeTransfer(msg.sender, amount);
+        
+        emit MemePoolRefundClaimed(msg.sender, fid, amount);
+    }
+
     // =============================================================
     //                       VIEW FUNCTIONS
     // =============================================================
@@ -855,169 +891,12 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         return (stakerFids, stakerAddresses, stakeAmounts);
     }
 
-    /**
-     * @dev Get all voters across all submissions in the contest
-     * @return allVoters Array of unique voter addresses
-     * @return totalVoted Total amount voted by each voter across all submissions
-     */
-    function getAllVoters() external view returns (
-        address[] memory allVoters,
-        uint256[] memory totalVoted
-    ) {
-        uint256 count = _allVoters.length;
-        allVoters = new address[](count);
-        totalVoted = new uint256[](count);
-        
-        uint256 submissionCount = _allSubmissionFids.length;
-        
-        for (uint256 i = 0; i < count; ) {
-            address voter = _allVoters[i];
-            allVoters[i] = voter;
-            
-            // Calculate total voted by this voter
-            for (uint256 j = 0; j < submissionCount; ) {
-                totalVoted[i] += _submissionVotes[_allSubmissionFids[j]][voter];
-                unchecked { ++j; }
-            }
-            unchecked { ++i; }
-        }
-        
-        return (allVoters, totalVoted);
+    function getTotalClaimableRefund(address user) external view returns (uint256) {
+        return _pendingRefunds[user];
     }
 
-    /**
-     * @dev Get all stakers across all submissions in the contest
-     * @return allFids Array of unique staker FIDs
-     * @return allAddresses Array of staker addresses corresponding to FIDs
-     * @return totalStaked Total amount staked by each FID across all submissions
-     */
-    function getAllStakers() external view returns (
-        uint256[] memory allFids,
-        address[] memory allAddresses,
-        uint256[] memory totalStaked
-    ) {
-        uint256 count = _allStakerFids.length;
-        allFids = new uint256[](count);
-        allAddresses = new address[](count);
-        totalStaked = new uint256[](count);
-        
-        for (uint256 i = 0; i < count; ) {
-            uint256 fid = _allStakerFids[i];
-            allFids[i] = fid;
-            totalStaked[i] = _totalStakesByFid[fid];
-            
-            // Get address from first submission where this FID staked
-            uint256 submissionCount = _allSubmissionFids.length;
-            for (uint256 j = 0; j < submissionCount; ) {
-                uint256 submissionFid = _allSubmissionFids[j];
-                if (_submissionStakes[submissionFid][fid] > 0) {
-                    allAddresses[i] = _fidToAddress[submissionFid][fid];
-                    break;
-                }
-                unchecked { ++j; }
-            }
-            
-            unchecked { ++i; }
-        }
-        
-        return (allFids, allAddresses, totalStaked);
-    }
-
-    /**
-     * @dev Get voter info for a specific address across all submissions
-     * @param voter The voter address
-     * @return submissionFids Array of submission FIDs voted on
-     * @return amounts Array of amounts voted on each submission
-     * @return totalAmount Total amount voted across all submissions
-     */
-    function getVoterInfo(address voter) external view returns (
-        uint256[] memory submissionFids,
-        uint256[] memory amounts,
-        uint256 totalAmount
-    ) {
-        // Count how many submissions this voter voted on
-        uint256 voteCount = 0;
-        uint256 submissionCount = _allSubmissionFids.length;
-        
-        for (uint256 i = 0; i < submissionCount; ) {
-            uint256 fid = _allSubmissionFids[i];
-            if (_submissionVotes[fid][voter] > 0) {
-                unchecked { ++voteCount; }
-            }
-            unchecked { ++i; }
-        }
-        
-        // Create arrays
-        submissionFids = new uint256[](voteCount);
-        amounts = new uint256[](voteCount);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < submissionCount; ) {
-            uint256 fid = _allSubmissionFids[i];
-            uint256 amount = _submissionVotes[fid][voter];
-            
-            if (amount > 0) {
-                submissionFids[index] = fid;
-                amounts[index] = amount;
-                totalAmount += amount;
-                unchecked { ++index; }
-            }
-            unchecked { ++i; }
-        }
-        
-        return (submissionFids, amounts, totalAmount);
-    }
-
-    /**
-     * @dev Get staker info for a specific FID across all submissions
-     * @param fid The staker FID
-     * @return submissionFids Array of submission FIDs staked on
-     * @return amounts Array of amounts staked on each submission
-     * @return totalAmount Total amount staked across all submissions
-     * @return stakerAddress Address associated with this FID
-     */
-    function getStakerInfo(uint256 fid) external view returns (
-        uint256[] memory submissionFids,
-        uint256[] memory amounts,
-        uint256 totalAmount,
-        address stakerAddress
-    ) {
-        // Count how many submissions this FID staked on
-        uint256 stakeCount = 0;
-        uint256 submissionCount = _allSubmissionFids.length;
-        
-        for (uint256 i = 0; i < submissionCount; ) {
-            uint256 submissionFid = _allSubmissionFids[i];
-            if (_submissionStakes[submissionFid][fid] > 0) {
-                unchecked { ++stakeCount; }
-            }
-            unchecked { ++i; }
-        }
-        
-        // Create arrays
-        submissionFids = new uint256[](stakeCount);
-        amounts = new uint256[](stakeCount);
-        uint256 index = 0;
-        
-        for (uint256 i = 0; i < submissionCount; ) {
-            uint256 submissionFid = _allSubmissionFids[i];
-            uint256 amount = _submissionStakes[submissionFid][fid];
-            
-            if (amount > 0) {
-                submissionFids[index] = submissionFid;
-                amounts[index] = amount;
-                totalAmount += amount;
-                
-                if (stakerAddress == address(0)) {
-                    stakerAddress = _fidToAddress[submissionFid][fid];
-                }
-                
-                unchecked { ++index; }
-            }
-            unchecked { ++i; }
-        }
-        
-        return (submissionFids, amounts, totalAmount, stakerAddress);
+    function isMemePoolRefundAvailable() external view returns (bool) {
+        return _memePoolRefundAvailable;
     }
 
     // =============================================================
@@ -1037,7 +916,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
     function _refundMemePool() private {
         if (config.memePoolAmount > 0) {
-            IERC20(config.depeToken).safeTransfer(config.creator, config.memePoolAmount);
+            _memePoolRefundAvailable = true;
         }
     }
 

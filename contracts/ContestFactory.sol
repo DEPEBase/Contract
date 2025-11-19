@@ -102,6 +102,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 minEntriesRequired,
         uint256 submissionDuration,
         uint256 contestDuration,
+        uint256 fid,
         string calldata title,
         string calldata description
     ) 
@@ -130,6 +131,7 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
             minEntriesRequired,
             submissionDuration,
             contestDuration,
+            fid,
             title,
             description
         );
@@ -261,22 +263,27 @@ contract ContestFactory is ReentrancyGuard, Ownable, Pausable {
         uint256 minEntriesRequired,
         uint256 submissionDuration,
         uint256 contestDuration,
+        uint256 fid,
         string calldata title,
         string calldata description
     ) private returns (address) {
-        ContestInstance contestInstance = new ContestInstance(
-            config.depeToken,
-            msg.sender,
-            config.platformWallet,
-            netPoolAmount,
-            minEntriesRequired,
-            submissionDuration,
-            contestDuration,
-            title,
-            description,
-            config.maxVoteAmount,
-            config.minVoteAmount
-        );
+
+        ContestInstance.ConstructorParams memory params = ContestInstance.ConstructorParams({
+            depeToken: config.depeToken,
+            creator: msg.sender,
+            creatorFid: fid,
+            platformWallet: config.platformWallet,
+            memePoolAmount: netPoolAmount,
+            minEntriesRequired: minEntriesRequired,
+            submissionDuration: submissionDuration,
+            contestDuration: contestDuration,
+            title: title,
+            description: description,
+            maxVoteAmount: config.maxVoteAmount,
+            minVoteAmount: config.minVoteAmount
+        });
+        
+        ContestInstance contestInstance = new ContestInstance(params);
         
         address contestAddress = address(contestInstance);
         IERC20(config.depeToken).safeTransfer(contestAddress, netPoolAmount);

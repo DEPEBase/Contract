@@ -38,7 +38,7 @@ ContestInstance (per contest)
 
 **Base Mainnet:**
 - **DEPE Token**: `0x37e0f2d2340968981ed82d47c0112b1619dc5b07`
-- **ContestFactory**: `0xFC295B363b93806eCc01697B3DD504355164E4f6`
+- **ContestFactory**: `0x1Ee9D3807E92cDAc973B74CFf0d5DCeC7fE64692`
 
 
 ## Security Features

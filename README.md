@@ -38,7 +38,7 @@ ContestInstance (per contest)
 
 **Base Mainnet:**
 - **DEPE Token**: `0x37e0f2d2340968981ed82d47c0112b1619dc5b07`
-- **ContestFactory**: `0x1Ee9D3807E92cDAc973B74CFf0d5DCeC7fE64692`
+- **ContestFactory**: `0xd0A86cb10EaEbF19Eb2b93fC123eDe7457B96e90`
 
 
 ## Security Features
@@ -254,6 +254,7 @@ npx hardhat verify --network base <CONTRACT_ADDRESS> <CONSTRUCTOR_ARGS>
 - `vote(uint256 submissionFid, uint256 amount, uint256 fid, bytes calldata platformSignature)` - Vote for submission with $DEPE tokens and platform verification
 - `stake(uint256 submissionFid, uint256 amount, uint256 fid, bytes calldata platformSignature)` - Stake on submission with platform verification
 - `determineWinner()` - Determine contest winner based on vote points
+- `finalizeContest()` - Finalize contest by determining winner and setting phase to ENDED (can be called by anyone after deadline)
 - `claimMemeWinnerReward()` - Claim meme winner reward
 - `claimCreatorReward()` - Claim creator reward (20% of staking pool)
 - `claimStakerReward(uint256 fid)` - Claim staker reward for specific FID

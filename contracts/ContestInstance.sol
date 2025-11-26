@@ -478,12 +478,105 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
         }
     }
 
+    /**
+     * @dev Finalize contest by determining winner and setting phase to ENDED
+     * @notice Can be called by anyone after contest deadline to enable independent reward claiming
+     */
+    function finalizeContest() external onlyAfterContest nonReentrant {
+        // Only finalize if not already finalized
+        if (state.phase == ContestPhase.ENDED || state.phase == ContestPhase.FAILED) {
+            revert InvalidPhase(); // Already finalized
+        }
+        
+        // Check if contest has enough submissions
+        if (state.submissionCount < config.minEntriesRequired) {
+            state.phase = ContestPhase.FAILED;
+            emit ContestFailed("Not enough submissions");
+            _refundMemePool();
+            _refundAll();
+            return;
+        }
+
+        ContestPhase oldPhase = state.phase;
+
+        uint256 winnerIndex = type(uint256).max;
+        uint256 winnerFid = 0;
+        uint256 highestScore = 0;
+        uint256 highestVotes = 0;
+        bool found = false;
+
+        uint256 len = _allSubmissionFids.length;
+        
+        for (uint256 i = 0; i < len; ) {
+            uint256 fid = _allSubmissionFids[i];
+            Submission storage s = _submissions[fid];
+
+            uint256 scoreVotes = s.voteCount * ALPHA;
+            uint256 scoreVoteAmount = (s.totalVoteAmount * BETA) / 1e18;
+
+            uint256 finalScore = scoreVotes + scoreVoteAmount;
+
+            bool takeWinner = false;
+            if (finalScore > highestScore) {
+                takeWinner = true;
+            } else if (finalScore == highestScore) {
+                if (s.voteCount > highestVotes) {
+                    takeWinner = true;
+                } else if (s.voteCount == highestVotes) {
+                    if (!found || i < winnerIndex) {
+                        takeWinner = true;
+                    }
+                }
+            }
+
+            if (takeWinner) {
+                highestScore = finalScore;
+                highestVotes = s.voteCount;
+                winnerIndex = i;
+                winnerFid = fid;
+                found = true;
+            }
+
+            unchecked { ++i; }
+        }
+
+        if (!found || highestScore == 0) {
+            state.phase = ContestPhase.FAILED;
+            emit PhaseChanged(oldPhase, ContestPhase.FAILED);
+            emit ContestFailed("No valid votes or stakes received");
+            _refundAll();
+            return;
+        }
+
+        // Check if winner has stakers
+        uint256 totalStakeAmount = _submissions[winnerFid].totalStakeAmount;
+        if (totalStakeAmount == 0 && state.totalStakingPool > 0) {
+            _refundAllStakesAndVotes();
+        }
+
+        // Set winner and phase WITHOUT claiming reward
+        state.winningSubmissionFid = winnerFid;
+        state.phase = ContestPhase.ENDED;
+
+        emit WinnerDetermined(winnerFid, highestScore);
+        emit PhaseChanged(oldPhase, ContestPhase.ENDED);
+    }
+
     // =============================================================
     //                    REWARD DISTRIBUTION
     // =============================================================
     
     function claimMemeWinnerReward() external onlyAfterContest nonReentrant {
         if (state.memeRewardClaimed) revert AlreadyClaimed();
+        
+        // If already finalized, just claim the reward without re-determining winner
+        if (state.phase == ContestPhase.ENDED && state.winningSubmissionFid != 0) {
+            address winnerAddress = _submissions[state.winningSubmissionFid].submitter;
+            state.memeRewardClaimed = true;
+            IERC20(config.depeToken).safeTransfer(winnerAddress, config.memePoolAmount);
+            emit MemeRewardClaimed(state.winningSubmissionFid, config.memePoolAmount);
+            return;
+        }
         
         // Check if contest has enough submissions
         if (state.submissionCount < config.minEntriesRequired) {
@@ -570,7 +663,7 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
 
     function claimCreatorReward() external onlyOwner onlyAfterContest nonReentrant {
         if (state.creatorRewardClaimed) revert AlreadyClaimed();
-        if (state.phase != ContestPhase.ENDED) revert InvalidPhase();
+        if (getCurrentPhase() != ContestPhase.ENDED) revert InvalidPhase();
         
         state.creatorRewardClaimed = true;
         uint256 creatorReward = (state.totalStakingPool * CONTEST_CREATOR_PERCENT) / BASIS_POINTS;
@@ -583,7 +676,8 @@ contract ContestInstance is ReentrancyGuard, Ownable, Pausable {
     }
 
     function claimStakerReward(uint256 fid) external onlyAfterContest nonReentrant {
-        if (state.phase != ContestPhase.ENDED) revert InvalidPhase();
+        if (getCurrentPhase() != ContestPhase.ENDED) revert InvalidPhase();
+        if (state.winningSubmissionFid == 0) revert InvalidPhase(); // Contest must be finalized first
         
         uint256 winningSubmissionFid = state.winningSubmissionFid;
         uint256 stakeAmount = _submissionStakes[winningSubmissionFid][fid];
